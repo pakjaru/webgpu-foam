@@ -1,0 +1,224 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Foam: a native WebGPU renderer</title>
+    <meta name="description" content="A live demonstration of a native WebGPU renderer: Rust compiles the DOM into GPU buffers, pretext lays out the text, and every pane and glyph is drawn on the GPU." />
+    <meta name="theme-color" content="#f6f4ef" />
+    <link rel="icon" href="/favicon.ico" />
+    <meta property="og:type" content="website" />
+    <meta property="og:title" content="Foam: a native WebGPU renderer" />
+    <meta property="og:description" content="Rust compiles the DOM into GPU buffers; every pane and glyph is drawn with WebGPU." />
+    <meta property="og:image" content="%VITE_SITE_ORIGIN%/images/02.webp" />
+    <meta property="og:url" content="%VITE_SITE_ORIGIN%/" />
+    <link rel="canonical" href="%VITE_SITE_ORIGIN%/" />
+    <meta name="twitter:card" content="summary_large_image" />
+    <style>
+      :root {
+        --ink: #16140f;
+        --muted: #6b655b; /* 5.3:1 on --paper */
+        --paper: #f6f4ef;
+        --gutter: max(24px, 7vw);
+        --ease: cubic-bezier(0.23, 1, 0.32, 1);
+      }
+      * { box-sizing: border-box; }
+      body { margin: 0; background: var(--paper); color: var(--ink); font-family: system-ui, sans-serif; -webkit-font-smoothing: antialiased; }
+      :focus-visible { outline: 2px solid currentColor; outline-offset: 3px; }
+
+      /* Rendered by WebGPU; the DOM only supplies layout and colour. */
+      #webgpu-canvas { position: fixed; inset: 0; width: 100vw; height: 100vh; pointer-events: none; }
+      /* Every route's DOM stays laid out (so Rust can read it) but invisible;
+         the scene for each route is drawn by WebGPU. */
+      [data-route] { opacity: 0; pointer-events: none; }
+
+      /* GL text styles: font, size, line-height and colour are read per element. */
+      h1, h2, p { margin: 0; overflow-wrap: break-word; color: var(--ink); }
+      h1 { font: 600 clamp(44px, 6vw, 84px)/1.02 system-ui, sans-serif; }
+      h2 { font: 600 28px/1.15 system-ui, sans-serif; }
+      p { font: 17px/1.5 system-ui, sans-serif; max-width: 34em; color: #3d3931; }
+      .eyebrow { display: block; font: 600 12px/1.6 system-ui, sans-serif; color: var(--muted); }
+
+      /* Home */
+      #home { padding: 160px var(--gutter) 30vh; display: grid; gap: 120px; }
+      .hero { display: grid; grid-template-columns: 1.15fr 1fr; gap: 6vw; align-items: end; }
+      .copy { display: grid; gap: 24px; align-content: start; }
+      .grid { aspect-ratio: 4 / 3; background: #e4dfd5; padding: 20px; display: grid; grid-template-columns: repeat(4, 1fr); gap: 10px; align-content: start; }
+      .grid > div { aspect-ratio: 1; background: #cfc6b8; }
+      .grid > div:nth-child(3n) { background: #b9ad9b; }
+      .grid > div:nth-child(5n) { background: #8f8372; }
+      .section { display: grid; gap: 32px; }
+      .section-head { display: grid; grid-template-columns: 1fr 2fr; gap: 6vw; align-items: start; }
+      .row { display: grid; grid-template-columns: repeat(3, 1fr); gap: 20px; }
+      .row > div { aspect-ratio: 3 / 4; background: #c4bcae; }
+      .row > div:nth-child(2) { background: #8a8174; }
+      .row > div:nth-child(3) { background: #ddd5c7; }
+      .row.two { grid-template-columns: 2fr 1fr; }
+      .row.two > div { aspect-ratio: auto; height: 360px; }
+      .wide { height: 420px; background: #d6cebf; }
+
+      /* About */
+      #about { position: absolute; inset: 0 0 auto; padding: 140px var(--gutter); display: grid; gap: 20px; justify-items: start; }
+      #about h2 { font-size: clamp(36px, 4vw, 56px); }
+
+      /* Work */
+      #work { position: absolute; inset: 0 0 auto; height: 100vh; }
+      #work .image { position: absolute; inset: 0; }
+      #work .slide { position: absolute; left: var(--gutter); bottom: 15vh; display: grid; gap: 16px; max-width: 60vw; }
+      #work h2, #work p { color: #fff; }
+      #work h2 { font-size: clamp(48px, 7vw, 104px); }
+
+      /* Chrome (real DOM, visible) */
+      #nav { position: fixed; inset: 0 0 auto; z-index: 2; display: flex; align-items: center; gap: 28px; padding: 24px var(--gutter); color: var(--ink); transition: color 0.4s var(--ease); }
+      #nav.on-dark { color: #fff; text-shadow: 0 1px 4px rgba(0, 0, 0, 0.7); } /* light photos (e.g. 02) sit under it */
+      #nav .brand { margin-right: auto; font-weight: 700; letter-spacing: -0.02em; color: inherit; text-decoration: none; }
+      #nav a:not(.brand) { position: relative; font-size: 14px; color: inherit; text-decoration: none; opacity: 0.72; transition: opacity 0.3s; } /* ≥ 4.5:1 on paper */
+      #nav a:not(.brand):hover, #nav a[aria-current] { opacity: 1; }
+      #nav a:not(.brand)::after { content: ''; position: absolute; left: 0; right: 0; bottom: -4px; height: 1px; background: currentColor; transform: scaleX(0); transform-origin: right; transition: transform 0.5s var(--ease); }
+      #nav a[aria-current]::after { transform: scaleX(1); transform-origin: left; }
+
+      #view { position: fixed; left: var(--gutter); bottom: 24px; z-index: 2; display: flex; padding: 3px; gap: 2px; border-radius: 999px; background: rgba(22, 20, 15, 0.08); backdrop-filter: blur(8px); }
+      #view button { font: 500 12px system-ui, sans-serif; padding: 6px 12px; border: 0; border-radius: 999px; background: none; color: var(--ink); cursor: pointer; }
+      #view button[aria-pressed='true'] { background: var(--ink); color: var(--paper); }
+      #view.on-dark { background: rgba(0, 0, 0, 0.45); } /* dark backing keeps white labels readable on any photo */
+      #view.on-dark button { color: #fff; }
+      #view.on-dark button[aria-pressed='true'] { background: #fff; color: var(--ink); }
+
+      #work-ui { position: fixed; right: var(--gutter); bottom: 24px; z-index: 2; display: grid; justify-items: end; gap: 10px; color: #fff; }
+      #work-ui[hidden] { display: none; }
+      #work-ui .meta { display: flex; gap: 16px; padding: 4px 10px; border-radius: 999px; background: rgba(0, 0, 0, 0.45); font: 500 12px system-ui, sans-serif; }
+      #counter { font-variant-numeric: tabular-nums; }
+      #minimap { display: flex; gap: 6px; padding: 6px; border-radius: 10px; background: rgba(0, 0, 0, 0.3); backdrop-filter: blur(8px); }
+      #minimap button { width: 76px; height: 48px; padding: 0; border: 0; border-radius: 5px; overflow: hidden; background: none; cursor: pointer; opacity: 0.5; transition: opacity 0.3s, transform 0.5s var(--ease); }
+      #minimap button:hover { opacity: 0.85; transform: translateY(-2px); }
+      #minimap img { display: block; width: 100%; height: 100%; object-fit: cover; }
+      #minimap button[aria-current] { opacity: 1; box-shadow: 0 0 0 2px #fff; }
+
+      /* Photos are drawn on the GPU; these give crawlers and screen readers the same images.
+         Off-screen rather than clipped: lazy images out here are never fetched, the GPU loads its own copies. */
+      .sr-only { position: absolute; left: -10000px; top: 0; width: 1px; height: 1px; overflow: hidden; }
+
+      #message { position: fixed; inset: 0; display: none; place-items: center; padding: 2rem; }
+      #message.visible { display: grid; }
+
+      @media (max-width: 720px) {
+        .hero, .section-head, .row, .row.two { grid-template-columns: 1fr; }
+        #minimap button { width: 52px; height: 34px; }
+        /* Stack the minimap above the view toggle so their targets don't overlap. */
+        #work-ui { bottom: 72px; }
+      }
+    </style>
+  </head>
+  <body>
+    <canvas id="webgpu-canvas" aria-hidden="true"></canvas>
+
+    <main id="home" data-route="/">
+      <section class="hero">
+        <div class="copy" data-gl-frame>
+          <span class="eyebrow" data-gl-text>WEBGPU · RUST · PRETEXT</span>
+          <h1 data-gl-text>A live demonstration of a native WebGPU renderer.</h1>
+          <p data-gl-text data-split="words">The browser lays out the page. Rust reads it into instance buffers, pretext breaks the lines, and every pane and glyph is drawn on the GPU.</p>
+        </div>
+        <div class="grid" data-gl>
+          <div data-gl></div><div data-gl></div><div data-gl></div><div data-gl></div>
+          <div data-gl></div><div data-gl></div><div data-gl></div><div data-gl></div>
+          <div data-gl></div><div data-gl></div><div data-gl></div><div data-gl></div>
+        </div>
+      </section>
+
+      <section class="section">
+        <div class="section-head">
+          <span class="eyebrow" data-gl-text>01 — LAYOUT</span>
+          <div class="copy" data-gl-frame>
+            <h2 data-gl-text>Every element is a mesh.</h2>
+            <p data-gl-text>Vestibulum ante ipsum primis in faucibus orci luctus et ultrices posuere cubilia curae. Sed porttitor, nunc a tincidunt egestas, nisl nibh aliquet ipsum.</p>
+          </div>
+        </div>
+        <div class="row"><div data-gl></div><div data-gl></div><div data-gl></div></div>
+      </section>
+
+      <section class="section">
+        <div class="section-head">
+          <span class="eyebrow" data-gl-text>02 — TYPE</span>
+          <div class="copy" data-gl-frame>
+            <h2 data-gl-text data-split="chars">Every glyph is a quad.</h2>
+            <p data-gl-text data-split="words">Nec sodales massa justo non magna. Praesent at viverra ipsum, donec a arcu nec lectus bibendum feugiat.</p>
+          </div>
+        </div>
+        <div class="wide" data-gl></div>
+        <div class="row two"><div data-gl></div><div data-gl></div></div>
+      </section>
+
+      <ul class="sr-only" aria-label="Photographs">
+        <li><img src="/images/00.webp" alt="Overhead view of people crossing a zebra crossing, casting long shadows" loading="lazy" decoding="async" width="1" height="1" /></li>
+        <li><img src="/images/01.webp" alt="Streaks of light running across a dark road at night" loading="lazy" decoding="async" width="1" height="1" /></li>
+        <li><img src="/images/02.webp" alt="A bare branch lying in still, misty water" loading="lazy" decoding="async" width="1" height="1" /></li>
+        <li><img src="/images/03.webp" alt="A lone figure on a dark beach fading into fog" loading="lazy" decoding="async" width="1" height="1" /></li>
+        <li><img src="/images/04.webp" alt="A path disappearing into a dark forest" loading="lazy" decoding="async" width="1" height="1" /></li>
+        <li><img src="/images/05.webp" alt="Close-up of rippling water" loading="lazy" decoding="async" width="1" height="1" /></li>
+        <li><img src="/images/06.webp" alt="Round glasses resting on a knit cap" loading="lazy" decoding="async" width="1" height="1" /></li>
+        <li><img src="/images/07.webp" alt="The Eiffel Tower above a crowd, a bird in flight" loading="lazy" decoding="async" width="1" height="1" /></li>
+        <li><img src="/images/08.webp" alt="A runner's legs and shadow on sunlit asphalt" loading="lazy" decoding="async" width="1" height="1" /></li>
+        <li><img src="/images/09.webp" alt="A pale flower among dark leaves" loading="lazy" decoding="async" width="1" height="1" /></li>
+        <li><img src="/images/10.webp" alt="Towering clouds over a dark sky" loading="lazy" decoding="async" width="1" height="1" /></li>
+        <li><img src="/images/11.webp" alt="Rocks in a misty sea, long exposure" loading="lazy" decoding="async" width="1" height="1" /></li>
+        <li><img src="/images/12.webp" alt="A spiral of wooden slats against the sky" loading="lazy" decoding="async" width="1" height="1" /></li>
+      </ul>
+    </main>
+
+    <main id="about" data-route="/about">
+      <div class="copy" data-gl-frame>
+        <span class="eyebrow" data-gl-text>ABOUT</span>
+        <h2 data-gl-text data-split="chars">About this renderer.</h2>
+        <p data-gl-text>A fan of coloured panes, its own scene. Rust compiles the DOM into instance buffers; WebGPU draws each route to its own texture and reveals one through the other.</p>
+      </div>
+    </main>
+
+    <main id="work" data-route="/work">
+      <div class="image" data-gl-image></div>
+      <div class="slide">
+        <h2 data-gl-text data-slide="0">Field studies in light.</h2>
+        <img class="sr-only" src="/images/02.webp" alt="A bare branch lying in still, misty water" loading="lazy" decoding="async" width="1" height="1" />
+        <p data-gl-text data-slide="0">2026 · Photography</p>
+      </div>
+      <div class="slide">
+        <h2 data-gl-text data-slide="1" data-split="words">Night signals over water.</h2>
+        <img class="sr-only" src="/images/06.webp" alt="Round glasses resting on a knit cap" loading="lazy" decoding="async" width="1" height="1" />
+        <p data-gl-text data-slide="1">2025 · Installation</p>
+      </div>
+      <div class="slide">
+        <h2 data-gl-text data-slide="2" data-split="chars">Paper and dust.</h2>
+        <img class="sr-only" src="/images/09.webp" alt="A pale flower among dark leaves" loading="lazy" decoding="async" width="1" height="1" />
+        <p data-gl-text data-slide="2">2025 · Print series</p>
+      </div>
+      <div class="slide">
+        <h2 data-gl-text data-slide="3">The quiet orbit.</h2>
+        <img class="sr-only" src="/images/11.webp" alt="Rocks in a misty sea, long exposure" loading="lazy" decoding="async" width="1" height="1" />
+        <p data-gl-text data-slide="3">2024 · Film</p>
+      </div>
+    </main>
+
+    <nav id="nav">
+      <a class="brand" href="/">Foam</a>
+      <a href="/">Home</a>
+      <a href="/about">About</a>
+      <a href="/work">Work</a>
+    </nav>
+    <div id="view" role="group" aria-label="Render view">
+      <button data-mode="solid" aria-pressed="true">Solid</button>
+      <button data-mode="wire" aria-pressed="false">Wire</button>
+      <button data-mode="both" aria-pressed="false">Both</button>
+    </div>
+    <div id="work-ui" hidden>
+      <div class="meta"><span>← → or scroll</span><span id="counter">01 / 04</span></div>
+      <div id="minimap" role="group" aria-label="Slides">
+        <button aria-label="Slide 1" aria-current><img src="/images/thumbs/02.webp" fetchpriority="high" alt="" width="76" height="48" /></button>
+        <button aria-label="Slide 2"><img src="/images/thumbs/06.webp" alt="" width="76" height="48" /></button>
+        <button aria-label="Slide 3"><img src="/images/thumbs/09.webp" alt="" width="76" height="48" /></button>
+        <button aria-label="Slide 4"><img src="/images/thumbs/11.webp" alt="" width="76" height="48" /></button>
+      </div>
+    </div>
+    <div id="message" role="alert"></div>
+    <script type="module" src="/src/foam/boot.ts"></script>
+  </body>
+</html>

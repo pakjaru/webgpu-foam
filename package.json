@@ -14,6 +14,7 @@
     "tsconfig.json"
   ],
   "scripts": {
+    "wasm": "wasm-pack build dom-compiler --target web --out-dir ../src/foam/pkg --no-pack",
     "dev": "vite",
     "build": "tsc && vite build",
     "preview": "vite preview",
@@ -40,7 +41,9 @@
     "access": "public"
   },
   "devDependencies": {
+    "@chenglou/pretext": "^1.0.0",
     "@webgpu/types": "^0.1.64",
+    "gsap": "^3.15.0",
     "lil-gui": "^0.21.0",
     "typescript": "^5.8.3",
     "vite": "^6.2.6"

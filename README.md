@@ -2,6 +2,10 @@
 
 A zero-runtime-dependency initializer for creating a focused Vite + TypeScript WebGPU project. Choose a starter scene, rotation behavior, and whether to include a lil-gui Settings panel; the initializer generates only the code needed for those choices.
 
+## Foam website (this fork)
+
+This fork also hosts **Foam**, a WebGPU learning website built on the template: `foam.html`, `src/foam/`, the Rust crate `dom-compiler/` and `public/`. Foam is not part of the scaffolder output. `bin/` skips `src/foam`, and package.json `files` excludes it. To run it, use `npm install`, `npm run wasm` (needs wasm-pack) and `npm run dev`. [AGENTS.md](AGENTS.md) covers the architecture, commands and contracts. [llms.txt](llms.txt) is an index for LLMs.
+
 ## Create a project
 
 ```sh

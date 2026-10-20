@@ -3,3 +3,4 @@ dist
 .DS_Store
 .env
 dom-compiler/target
+src/foam/lib/wasm/

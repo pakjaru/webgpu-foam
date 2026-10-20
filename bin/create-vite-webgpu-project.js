@@ -135,7 +135,12 @@ try {
     createdDirectory = true;
   }
 
-  await cp(path.join(packageRoot, "src"), path.join(targetDirectory, "src"), { recursive: true });
+  // src/foam is the Foam website that lives in this repository, not part of the template.
+  const foamDirectory = path.join(packageRoot, "src", "foam");
+  await cp(path.join(packageRoot, "src"), path.join(targetDirectory, "src"), {
+    recursive: true,
+    filter: (source) => source !== foamDirectory && !source.startsWith(foamDirectory + path.sep),
+  });
   await customizeGeneratedSource();
   await mkdir(path.join(targetDirectory, "public"));
   await Promise.all([

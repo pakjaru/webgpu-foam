@@ -13,6 +13,10 @@ struct U {
   mouse: vec2f,   // smoothed cursor, document px
   hover: f32,     // cursor presence 0..1 (fades out when it leaves the page)
   lift: f32,      // 1 = this draw reacts to the cursor (photos), 0 = it doesn't
+  fade: f32,      // draw opacity 0..1 (work list rows fade with the list view)
+  _p0: f32,
+  _p1: f32,
+  _p2: f32,
 }
 @group(0) @binding(0) var<uniform> u: U;
 @group(0) @binding(1) var atlas: texture_2d<f32>;
@@ -20,7 +24,7 @@ struct U {
 // Photos: one array layer each, squashed to a square; `aspects` holds each
 // photo's real width / height so cover-cropping can undo the squash.
 @group(0) @binding(3) var images: texture_2d_array<f32>;
-@group(0) @binding(4) var<uniform> slide: vec4f; // work: current layer, next layer, progress 0..1
+@group(0) @binding(4) var<uniform> slide: vec4f; // work: current layer, next layer, progress 0..1, list view 0..1
 @group(0) @binding(5) var<storage, read> aspects: array<f32>;
 
 struct Out {
@@ -124,7 +128,10 @@ fn vs_text(
   // Slide up from below its line; the line's bottom edge masks it.
   var r = rect;
   r.y += (lineBottom - rect.y) * (1.0 - reveal);
-  var o = place(uv, r, color, f32(ii));
+  // Text sits a few layers above whatever it is laid over (e.g. the work image).
+  var c = color;
+  c.w += 3.0;
+  var o = place(uv, r, c, f32(ii));
   o.atlasUv = mix(atlasRect.xy, atlasRect.zw, uv);
   o.clipY = lineBottom;
   return o;
@@ -135,7 +142,7 @@ fn fs_solid(i: Out) -> @location(0) vec4f {
   // Sample unconditionally: textureSample needs uniform control flow.
   let photo = textureSample(images, atlasSampler, i.atlasUv, i32(max(i.img, 0.0))).rgb * (1.0 + 0.12 * i.bulge);
   let shade = 0.85 + 0.15 * (1.0 - i.uv.y);
-  return vec4f(select(i.color * shade, photo, i.img >= 0.0), 1.0);
+  return vec4f(select(i.color * shade, photo, i.img >= 0.0), u.fade);
 }
 
 @fragment
@@ -143,12 +150,12 @@ fn fs_text(i: Out) -> @location(0) vec4f {
   // Sample before discarding: textureSample needs uniform control flow.
   let a = textureSample(atlas, atlasSampler, i.atlasUv).a;
   if (i.docY > i.clipY - 0.5) { discard; }
-  return vec4f(i.color, a);
+  return vec4f(i.color, a * u.fade);
 }
 
 @fragment
 fn fs_wire(i: Out) -> @location(0) vec4f {
-  if (i.docY > i.clipY - 0.5) { discard; }
+  if (i.docY > i.clipY - 0.5 || u.fade < 0.5) { discard; }
   return vec4f(0.05, 0.05, 0.05, 1.0);
 }
 
@@ -176,6 +183,7 @@ fn fs_image(i: Out) -> @location(0) vec4f {
   let cur = textureSample(images, atlasSampler, curUv, i32(slide.x)).rgb * (1.0 - 0.5 * e);
   let next = textureSample(images, atlasSampler, nextUv, i32(slide.y)).rgb;
   // Darken toward the bottom so the white title reads on bright photos.
-  let scrim = mix(1.0, 0.45, smoothstep(0.35, 1.0, i.uv.y));
+  // In list view the image is a row thumbnail: no scrim.
+  let scrim = mix(1.0, mix(0.45, 1.0, slide.w), smoothstep(0.35, 1.0, i.uv.y));
   return vec4f(select(cur, next, i.uv.y > 1.0 - e) * scrim, 1.0);
 }

@@ -1,6 +1,6 @@
-import { layoutWithLines, prepareWithSegments, type PreparedTextWithSegments } from '@chenglou/pretext';
+import { STRIDE } from '../lib/dom_compiler';
+import { breakLines, prepareText, type PreparedText } from '../lib/pretext';
 
-const STRIDE = 8; // Rust instance stride: [x, y, w, h, r, g, b, depth]
 export const TEXT_STRIDE = 13; // + atlas uv rect [u0, v0, u1, v1] + line bottom (doc px)
 // Split-text stagger, in seconds, per unit of the element's `data-split`
 // ("lines" | "words" | "chars", default "lines"). Glyphs in one unit rise together.
@@ -11,7 +11,7 @@ const PAD = 1; // px of ink padding so antialiased edges aren't clipped
 
 // prepare() is the expensive pass (segmenting + canvas measuring); run it once
 // per element/font/text and only re-run the cheap layout() on resize.
-const cache = new WeakMap<Element, { key: string; prepared: PreparedTextWithSegments }>();
+const cache = new WeakMap<Element, { key: string; prepared: PreparedText }>();
 const segmenter = new Intl.Segmenter();
 
 /** Font shorthand and pretext's prepared text for `el`, cached until either changes. */
@@ -21,7 +21,7 @@ function prepare(el: Element, style: CSSStyleDeclaration) {
   const key = `${font}|${text}`;
   let entry = cache.get(el);
   if (entry?.key !== key) {
-    entry = { key, prepared: prepareWithSegments(text, font) };
+    entry = { key, prepared: prepareText(text, font) };
     cache.set(el, entry);
   }
   return { font, text, prepared: entry.prepared };
@@ -111,14 +111,14 @@ export function layoutText(elements: Element[], rects: Float32Array, atlas: HTML
     const fm = measure(ctx, `${font}|M`, 'M');
     // CSS centres the font's ascent+descent box inside the line box.
     const baseline = (lineHeight - (fm.fontAscent + fm.fontDescent)) / 2 + fm.fontAscent;
-    layoutWithLines(prepared, base[2], lineHeight).lines.forEach((line, j) => {
+    breakLines(prepared, base[2], lineHeight).forEach((line, j) => {
       let x = base[0];
       const y = base[1] + j * lineHeight + baseline;
       // Mask edge: the line box, or lower if a descender (g, y, p) hangs past it.
       let lineBottom = base[1] + (j + 1) * lineHeight;
-      for (const { segment: g } of segmenter.segment(line.text))
+      for (const { segment: g } of segmenter.segment(line))
         lineBottom = Math.max(lineBottom, y + measure(ctx, `${font}|${g}`, g).descent);
-      for (const { segment: g } of segmenter.segment(line.text)) {
+      for (const { segment: g } of segmenter.segment(line)) {
         const gk = `${font}|${g}`;
         const m = measure(ctx, gk, g);
         if (g.trim()) {

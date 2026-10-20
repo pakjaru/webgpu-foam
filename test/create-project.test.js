@@ -9,18 +9,22 @@ import test from "node:test";
 
 const execFileAsync = promisify(execFile);
 const cli = path.resolve("bin/create-vite-webgpu-project.js");
-const tsc = path.resolve("node_modules/.bin/tsc");
-const vite = path.resolve("node_modules/.bin/vite");
+// Run the tools' JS entry points through Node: node_modules/.bin holds shell
+// shims that Windows cannot spawn directly.
+const tsc = path.resolve("node_modules/typescript/bin/tsc");
+const vite = path.resolve("node_modules/vite/bin/vite.js");
 
 async function assertTypeChecks(projectDirectory) {
-  await symlink(path.resolve("node_modules"), path.join(projectDirectory, "node_modules"), "dir");
-  await execFileAsync(tsc, ["--project", path.join(projectDirectory, "tsconfig.json")], {
+  // Windows only allows directory symlinks with extra privileges; a junction needs none.
+  const linkType = process.platform === "win32" ? "junction" : "dir";
+  await symlink(path.resolve("node_modules"), path.join(projectDirectory, "node_modules"), linkType);
+  await execFileAsync(process.execPath, [tsc, "--project", path.join(projectDirectory, "tsconfig.json")], {
     cwd: projectDirectory,
   });
 }
 
 async function assertBuilds(projectDirectory) {
-  await execFileAsync(vite, ["build"], { cwd: projectDirectory });
+  await execFileAsync(process.execPath, [vite, "build"], { cwd: projectDirectory });
 }
 
 test("creates a ready-to-install project", async () => {

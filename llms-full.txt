@@ -1,0 +1,402 @@
+# Foam (webgpu-foam): full reference
+
+> This is a self-contained reference for LLMs and coding agents. The repo is a fork of jeantimex/webgpu-foam. It holds (1) the origin npm scaffolder `create-vite-webgpu-project` and (2) Foam, a WebGPU learning website. In Foam the browser lays out invisible DOM, a Rust/wasm crate reads that layout into GPU instance buffers, pretext breaks text lines, and WebGPU draws every pane and glyph. Each route renders to its own texture, and a growing circle reveals one route through another. The short index is llms.txt. The working guide is AGENTS.md. All paths are repo-relative.
+
+## 1. Two projects in one checkout
+
+Scaffolder (origin, keep as upstream):
+- `bin/create-vite-webgpu-project.js`: the CLI.
+- `template/`: overlay files (`assets`, `empty`, `empty-gui`, `gui`, `none`, `none-gui`, `shape`).
+- The template demo in `src/`: everything except `src/foam/`.
+- `index.html`, `tsconfig.json`: copied into generated projects.
+- `test/create-project.test.js`: the tests.
+- Fork-only changes: the `src/foam` copy filter in bin/ and `"!src/foam"` in package.json `files`.
+
+Foam website:
+- `foam.html`: the page.
+- `src/foam/`: TypeScript and WGSL.
+- `dom-compiler/`: Rust crate, built to wasm.
+- `public/`: photos, thumbnails, robots, sitemap, favicon.
+- `vite.config.ts`: route rewrite.
+- `.env`: site origin.
+
+## 2. Setup and commands
+
+```bash
+npm install
+npm run wasm        # wasm-pack build dom-compiler --target web --out-dir ../src/foam/lib/wasm --no-pack
+npm run dev         # vite; /, /about, /work are rewritten to /foam.html; template demo at /index.html
+npx tsc --noEmit    # tsconfig includes src/ (demo + foam), strict, noUnusedLocals/Parameters
+npm test            # node --test: scaffolder tests (generate projects, tsc + vite build each)
+npm run test:wasm   # cargo test --manifest-path dom-compiler/Cargo.toml
+npm run build       # tsc && vite build -> dist/ (inputs: index.html, foam.html)
+npm run preview     # vite preview of dist/, same rewrite, plus cache headers
+```
+
+- `npm run wasm` needs Rust and wasm-pack. Rerun it after cloning and after any edit to `dom-compiler/`. Its output `src/foam/lib/wasm/` (`dom_compiler.js`, `dom_compiler_bg.wasm`, `.d.ts` files) is generated and git-ignored. tsc, dev and build fail without it.
+- `.env` is git-ignored. Create it with `VITE_SITE_ORIGIN=https://foam.example.com`. `foam.html` uses `%VITE_SITE_ORIGIN%` and `routes.ts` uses `import.meta.env.VITE_SITE_ORIGIN`. `public/robots.txt` and `public/sitemap.xml` hardcode the same origin and must be kept in sync by hand.
+- `.claude/launch.json` defines the dev server `vite` (`npm run dev`, port 5173).
+- Preview cache headers (vite.config.ts): `/assets/*` gets `public, max-age=31536000, immutable`, and `/images/*` gets `public, max-age=604800`.
+- Runtime packages are in `dependencies`: `@chenglou/pretext` ^1.0.0, `gsap` ^3.15.0, `lenis` ^1.3.27. Dev packages: `@webgpu/types`, `lil-gui` (template), `typescript`, `vite` ^6.2.6. Node >= 18.
+
+## 3. Data flow
+
+1. `foam.html` loads `src/foam/boot.ts`. Boot calls `applyMeta(routeIndex())` (title, meta, canonical, OG, `inert` routes, `#work-ui`, nav `aria-current`). It waits for `load` and the first `paint` PerformanceObserver entry, then runs `setTimeout(() => import('./main'))`.
+2. `main()` awaits `initDomCompiler()` (wasm init) and `document.fonts.ready`. It calls `initializeWebGPU(canvas)` and configures the context with `alphaMode: 'opaque'`.
+3. It creates the shared buffers: grid mesh uv / triangle index / line index buffers, a linear sampler, the fan instance buffer and the fan photo-layer buffer.
+4. `loadPhotos(device)` loads 13 webp photos. Each is resized to 1024x1024 and copied into one `rgba8unorm` 2d-array texture, one upload per task. The real aspects (w / h) go into a read-only storage buffer.
+5. `createPipelines(device, format)` builds the bind group layouts, the six scene pipelines and the composite pipeline.
+6. `warmText(el)` runs for each `[data-gl-text]`, one task each. It does the pretext prepare and the glyph metrics.
+7. The `compileScenes()` generator runs with a task per yield (two yields per route). Per route it builds instance buffers and the draw list (section 6).
+8. A `ResizeObserver` on each route root calls `recompile()`. That destroys everything in `owned` and reruns `compileScenes()` synchronously.
+9. Input, router, IntersectionObserver and Lenis are set up, `onRoute()` runs, and `requestAnimationFrame(frame)` starts.
+10. Each frame: advance the reveal, (re)create the render targets on resize, update the work list, hero, cursor and spin state, render the `from` and `to` scenes into their textures, then composite onto the canvas.
+
+Errors from `main()` are shown in `#message` (role=alert). An example is "WebGPU is not supported in this browser...".
+
+## 4. DOM hooks (foam.html)
+
+- `<main data-route="/">`, `"/about"`, `"/work"`: one scene each, indexed in document order: 0 home, 1 about, 2 work. CSS `[data-route] { opacity: 0; pointer-events: none }` keeps them laid out but invisible.
+- `data-gl`: a box. It is compiled with `background-color`. A leaf gets a photo layer: `data-photo="n"` if present, else `photo++ % 13`, with the counter running across routes in order. An element that contains `[data-gl]` descendants gets -1 (flat colour). Home has 12 `.grid` cells in a `.grid` container, a `.row` of 3, a `.wide` and a `.row.two` of 2. On work, the only `data-gl` elements are the 8 `#work-list .thumb` spans (with `data-photo`).
+- `data-gl-image`: the work hero (`#work .image`, full screen). Only the first match is used.
+- `data-gl-text`: a text block, compiled with `color`. `data-split="lines" | "words" | "chars"` (default `lines`).
+- `data-slide="i"`: work slide text (13 slides, 0..12). `data-list`: work list row text.
+- `data-gl-frame`: wire outline. The frames selector is `[data-gl-frame], [data-gl-text]:not([data-slide]):not([data-list])`.
+- `data-mode="solid" | "wire" | "both"`: the buttons in `#view`.
+- `data-index="i"`: on `#work-list .row-btn`.
+- Real DOM chrome:
+  - `#nav`: brand plus Home, About and Work links.
+  - `#view`: render-mode group.
+  - `#work-ui`: hidden unless on /work. Holds `#list-toggle`, `.meta` with `#counter` "01 / 13", and `#minimap` with 13 thumbnail buttons (five visible).
+  - `#webgpu-canvas`: fixed, `pointer-events: none`, `aria-hidden`.
+- Accessibility copies: home has an sr-only `<ul>` of all 13 photos with alt text, and each work slide has an sr-only `<img>`. `.sr-only` sits off-screen at left -10000px, so lazy images there are never fetched.
+
+## 5. Instance layouts
+
+Box instance, `STRIDE = 8` floats (`dom-compiler/src/lib.rs` and `src/foam/lib/dom_compiler.ts`):
+
+| float | field |
+| --- | --- |
+| 0-3 | x, y, w, h: document px (`getBoundingClientRect` + `window.scrollX/Y`) |
+| 4-6 | r, g, b, 0..1, from the computed colour property (`rgb()`/`rgba()`; white if alpha is 0 or the value is unparsable) |
+| 7 | depth: count of `data-gl` ancestors (`layer_depth`) |
+
+Text instance, `TEXT_STRIDE = 13` floats (`src/foam/text/text_layout.ts`):
+
+| float | field |
+| --- | --- |
+| 0-3 | glyph ink box x, y, w, h (doc px) |
+| 4-7 | r, g, b, depth, copied from the element's compiled rect |
+| 8-11 | atlas uv u0, v0, u1, v1 |
+| 12 | lineBottom: doc-px y of the line's mask edge |
+
+Grid mesh (`src/foam/scene/grid_mesh.ts`): N = 16, so (N+1)^2 = 289 uv pairs. There are 1536 triangle indices and 128 outline-line indices (perimeter only, along grid vertices). Index format is `uint16`.
+
+Fan instances (`src/foam/scene/fan.ts`): `FAN_CARDS = 13`. Each is `[0, 0, 180, 240, 0.5, 0.5, 0.5, 0]`. The shader places the fins, and the rect only sets the photo crop aspect. `fanPhotos()` gives layer `i % 13`.
+
+## 6. Draw list (compileScenes in main.ts)
+
+Per route, in order:
+1. About only: `boxDraws(scene, fan, FAN_CARDS, ring=1, fanLayers)`, i.e. `boxSolid` + `boxWire` with `lift: 1`.
+2. `[data-gl]` boxes:
+   - Home and about: `boxSolid` + `boxWire` (`lift: 1`), slot 2 = photo layers.
+   - Work: the boxes are copied into `thumbBuffer` (rewritten every frame for the hover grow) and kept as `listThumbs`. `listRows = compileRects(root, '#work-list .row-btn', 'color')` and `listPeriod` are computed. For each copy in `COPIES = [-1, 0, 1]` it adds `boxFade` + `boxWire` with `list: 1, copy`.
+3. `[data-gl-image]`: `heroRect` = the first rect. `heroBuffer` (1 instance) is rewritten every frame. It is drawn with `image`, slot 2 = `noPhotos(1)`, and has no lift, so no cursor bulge.
+4. (yield)
+5. `[data-gl-text]`: `layoutText(textEls, compileRects(root, '[data-gl-text]', 'color'), atlases[scene])`. This creates the instance buffer, a per-glyph progress buffer (slot 2) and the atlas texture. It adds `textSolid` (bindings 1 atlas, 2 sampler) + `textWire`, once, or once per copy in `COPIES` on work.
+6. Frames: one `boxWire` draw over the frames selector, slot 2 = `noPhotos(n)`.
+7. (yield)
+
+`Draw` = { pipeline, bindGroup, uniform (own 128-byte buffer), index, n (index count), instances, count, wire, ring, scene, slot2, lift?, list?, copy? }. Everything allocated per compile goes into `owned` and is destroyed on recompile.
+
+`listPeriod = max(1, lastRow.y + lastRow.h + gap - row0.y)`, where `gap = row1.y - (row0.y + row0.h)` (or 0 with one row).
+
+## 7. Pipelines (src/foam/renderer/pipelines.ts)
+
+Vertex buffers, the same for every scene pipeline:
+- Slot 0: uv, `arrayStride 8`, `@location(0) float32x2`.
+- Slot 1, instance: `arrayStride stride*4`. `@location(1)` offset 0 `float32x4` (rect), `@location(2)` offset 16 `float32x4` (colour + depth). Text only: `@location(3)` offset 32 `float32x4` (atlas rect) and `@location(4)` offset 48 `float32` (lineBottom).
+- Slot 2, instance: `arrayStride 4`, one float. Text: `@location(5)` reveal progress. Boxes: `@location(6)` photo layer (-1 = none).
+
+| key | topology | vertex | fragment | stride | layout | blend | depth write |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| image | triangle-list | vs_image | fs_image | 8 | boxLayout | none | yes |
+| boxSolid | triangle-list | vs | fs_solid | 8 | boxLayout | none | yes |
+| boxWire | line-list | vs | fs_wire | 8 | boxLayout | none | yes |
+| boxFade | triangle-list | vs | fs_solid | 8 | boxLayout | alpha | no |
+| textSolid | triangle-list | vs_text | fs_text | 13 | textLayout | alpha | no |
+| textWire | line-list | vs_text | fs_wire | 13 | boxLayout | none | yes |
+
+Alpha blend: colour `src-alpha` / `one-minus-src-alpha`, alpha `one` / `one-minus-src-alpha`. All scene pipelines use `multisample.count = SAMPLES` (4), `depth24plus` and `depthCompare: 'less-equal'`. The composite pipeline uses `layout: 'auto'`, entry points `vs` / `fs`, and is single-sample.
+
+## 8. Bind groups
+
+`scene.wgsl`, group 0:
+
+| binding | WGSL | type | visibility (layout) |
+| --- | --- | --- | --- |
+| 0 | `u: U` | uniform | VERTEX, FRAGMENT |
+| 1 | `atlas` | texture_2d<f32> | FRAGMENT (textLayout only) |
+| 2 | `atlasSampler` | sampler | FRAGMENT |
+| 3 | `images` | texture_2d_array<f32> | FRAGMENT (boxLayout only) |
+| 4 | `slide` | uniform vec4f | FRAGMENT (boxLayout only) |
+| 5 | `aspects` | storage, read array<f32> | VERTEX, FRAGMENT (boxLayout only) |
+
+- `boxLayout` = {0, 2, 3, 4, 5}. Its entries are `photoEntries` in main.ts: sampler, the photo texture `2d-array` view, `slideUniform`, `photos.aspects`.
+- `textLayout` = {0, 1, 2}. Its entries are the route's atlas texture view and the sampler.
+- `composite.wgsl`: 0 `c: C` uniform, 1 `fromTex`, 2 `toTex`, 3 `samp`. Bind groups are cached per `"from>to"` key and cleared when the render targets are recreated.
+
+## 9. Uniforms
+
+`struct U` (scene.wgsl). Each draw has its own 128-byte buffer, written each frame as a `Float32Array(32)`:
+
+| float | byte | field | value written in main.ts |
+| --- | --- | --- | --- |
+| 0-15 | 0 | viewProj: mat4x4f | `perspective(PI/4, w/h, 1, dist*4) * lookAt([0,0,dist],[0,0,0])` |
+| 16-17 | 64 | viewport: vec2f | canvas clientWidth, clientHeight (CSS px) |
+| 18 | 72 | scroll | `scrollY` for the current route, the saved `sceneScroll` for the outgoing one, `listBase - copy*listPeriod` on work |
+| 19 | 76 | spin | `spin.angle` (rad) |
+| 20 | 80 | count | `FAN_CARDS` (13) |
+| 21 | 84 | wire | `d.wire` (0/1) |
+| 22 | 88 | ring | `d.ring` (1 = fan fin) |
+| 23 | 92 | spinVel | `spin.vel` (rad/s) |
+| 24-25 | 96 | mouse: vec2f | eased cursor x, y + scroll (doc px) |
+| 26 | 104 | hover | cursor presence 0..1 (target 0 with reduced motion) |
+| 27 | 108 | lift | `d.lift ?? 0` |
+| 28 | 112 | fade | `d.list ? list.v : 1` |
+| 29-31 | 116 | _p0, _p1, _p2 | 0 |
+
+`mouse` must stay at an 8-byte-aligned offset. Add or reorder fields in the WGSL struct and in the `u.set([...], 16)` call together.
+
+`slide` (16 bytes): `[SLIDE_PHOTOS[slide.cur], SLIDE_PHOTOS[slide.next], slide.k, list.v]`.
+
+`C` (16 bytes): `[p, w/h, now/1000, 0]` = p (reveal 0..1), aspect, time (written but not read by the shader), _pad.
+
+## 10. Shaders
+
+`scene.wgsl`:
+- `place(uv, rect, color, index)`:
+  - Page position: `px = rect.xy + uv*rect.zw - (0, scroll)`, then world `(px.x - vw/2, vh/2 - px.y, depth*4)`.
+  - Bulge: `exp(-d^2/220^2) * hover * lift * (1 - ring)`, adding up to 70 px of z.
+  - Fan position: angle `index/count*2PI + spin - uv.x^2 * (lag*0.08 + flutter)`, with `lag = clamp(spinVel, -4, 4)` and `flutter = sin(uv.y*6 - spin*4 + index) * |lag| * 0.03`. Radial distance is `FIN_GAP (90) + local.x + FIN_W/2`, the y offset is `local.y - radial*0.35`, and the whole fan is tilted 0.45 rad about X. Fins are `FIN_W = 180`, `FIN_H = 240`.
+  - Output: `mix(page, ring, u.ring)`. Wire draws get `pos.z -= wire*0.0005*pos.w`. Also `docY = rect.y + uv.y*rect.w` and `clipY = 1e9`.
+- `vs`: photo uv = `lens(cover(uv, w/h, aspects[img]), bulge)` when `img >= 0`.
+- `vs_text`: `rect.y += (lineBottom - rect.y) * (1 - reveal)`, `depth += 3`, `atlasUv = mix(atlasRect.xy, atlasRect.zw, uv)`, `clipY = lineBottom`.
+- `vs_image`: `img` = the element aspect `w/h`.
+- `fs_solid`: always samples the photo (layer `max(img, 0)`), brightened by `1 + 0.12*bulge`. Flat colour is shaded `0.85 + 0.15*(1 - uv.y)`. Alpha = `fade`.
+- `fs_text`: samples the atlas alpha first, then discards if `docY > clipY - 0.5`. Output is `(color, a*fade)`.
+- `fs_wire`: discards below `clipY - 0.5` or when `fade < 0.5`. Colour is `(0.05, 0.05, 0.05)`.
+- `fs_image`: `e = smoothstep(k)`. The current photo drifts up `0.12e` and darkens `0.5e`. The next photo settles from a 12% zoom and rises from the bottom (`uv.y > 1 - e`). The bottom scrim goes down to 0.45 (`smoothstep(0.35, 1, uv.y)`) and fades out as `list.v` goes to 1.
+- `cover(uv, box, img)` is object-fit: cover. `lens(uv, b) = (uv - 0.5)*(1 - 0.16b) + 0.5`.
+
+`composite.wgsl`:
+- Vertex: a fullscreen triangle from `vertex_index`.
+- Radius: `e` = expo in-out of `p`, and the radius is `e * maxR` with `maxR = |(aspect/2, 1/2)| + 0.15`. `alive = sin(p*PI)`, so nothing distorts at rest.
+- Zoom: `fromUv` zooms out by `1 + 0.08e` and `toUv` settles from `1 - 0.1(1 - e)`.
+- Rim: the lens push `exp(-x^2/0.16^2) * alive` offsets uvs along the radius by `0.08`. RGB aberration samples r/g/b at 1.4 / 1.0 / 0.6 of the offset (`from` uses half the offset and dims by `1 - 0.3e`).
+- Edge: the feather is `1 - smoothstep(-0.012, 0.004, x)`, and the rim highlight is `exp(-|x + 0.006|*60) * alive * 0.22`.
+
+## 11. Text layout and split-text
+
+- `prepare(el)`: font = `${fontStyle} ${fontWeight} ${fontSize} ${fontFamily}`. pretext `prepareText` is cached per element until font or text changes. Glyph metrics (`measureText`: advance, ink box + `PAD = 1`, font ascent/descent) are cached per `font|grapheme`. Graphemes come from `Intl.Segmenter`.
+- Lines: `breakLines(prepared, rect.w, lineHeight)`, where lineHeight = computed `line-height` or `fontSize * 1.2`. Baseline = `(lineHeight - (fontAscent + fontDescent))/2 + fontAscent` (measured on "M"). `lineBottom = max(lineTop + lineHeight, baseline + max descent on the line)`. Pen x advances by `measureText` widths, with no kerning (`ponytail:` note).
+- Atlas: unique glyphs are shelf-packed in device px into a 2048-wide canvas per route. Cell = `ceil(ink*dpr) + 1`, height = rows used. Glyphs are painted white and tinted in the shader, then uploaded with `copyExternalImageToTexture`.
+- Stagger: `DELAY = { lines: 0.1, words: 0.04, chars: 0.012 }` s per unit. The unit index is the line index, the word counter (it advances at word and line ends), or the non-space char counter.
+- `layoutText` returns `{ data, block (element index per glyph), delay (s per glyph) }`.
+- Timing (main.ts): each element has `{ time }` in a WeakMap. `play(el)` tweens `time` from 0 to `maxDelay + GLYPH_SECONDS (1.4)` linearly with gsap. The start is delayed by `max(0, REVEAL_AT (0.9) - p) * REVEAL_SECONDS` during a route change. Each frame, for the scenes on screen, glyph progress = `power3.out(clamp((time - delay)/1.4, 0, 1))` is written to the slot-2 buffer.
+- Triggers: an IntersectionObserver over all `[data-gl-text]` plays an element the first time it is in view during a route visit (`played` WeakSet). Elements in the current route only. Skipped while hidden: `data-list` unless the list is on, and `data-slide` unless it is the current slide and the list is off. Entering a route resets its text and plays what is in view.
+- `sink(el)` tweens `time` to 0 over 0.5 s with `power2.in`. `replay(el, delay)` resets and plays after the delay.
+- Reduced motion: `time` is set to the full duration at once.
+
+## 12. Routes, router and reveal
+
+- `routes.ts`: `routeIndex()` matches `location.pathname` (trailing slash stripped) against `data-route`, and unknown paths fall back to 0. `META` holds:
+  - `/`: "Foam: a native WebGPU renderer", og image 02.
+  - `/about`: "About · Foam WebGPU renderer", image 00.
+  - `/work`: "Work · Foam WebGPU renderer", image 06.
+- `applyMeta(i)` sets `document.title`, the description, `og:title`, `og:description`, `og:url`, `og:image` (`${SITE_ORIGIN}/images/NN.webp`) and the canonical link. It sets `inert` on the other routes, sets `#work-ui.hidden` unless on /work, and sets `aria-current` on the matching nav link.
+- Navigation: a `#nav` link click (no meta, ctrl or shift, primary button) calls `preventDefault`, `pushState` if the path changed, then `onRoute()`. `popstate` also calls `onRoute()`.
+- `onRoute()`, when the route changes:
+  - It saves `sceneScroll[to] = scrollY`.
+  - If `p > 0.5`, it sets `from = to`, so a click mid-reveal restarts from whichever scene covers more screen.
+  - It sets `to = next`, `p = 0`, and resets and replays the new route's text.
+  - On every call it runs `lenis.scrollTo(0, { immediate: true, force: true })`, `syncScroll()` and `applyMeta(next)`, and toggles `.on-dark` on `#nav` and `#view` (work, list off).
+- Reveal: `p += dt / REVEAL_SECONDS` (1.6 s, 0.15 s with reduced motion). At `p >= 1`: `from = to`, `p = 0`, and if work was left in list view, `setList(false, true)`.
+- Render targets (on resize or first frame):
+  - Depth: `depth24plus`, `sampleCount 4`.
+  - Colour: one MSAA texture in the canvas format, `sampleCount 4`.
+  - Scene textures: one single-sample texture per route (RENDER_ATTACHMENT | TEXTURE_BINDING).
+- Passes: each scene pass clears and renders into the MSAA target and resolves into `sceneTextures[scene]` (`storeOp: 'discard'` on colour and depth). Only `new Set([from, to])` is rendered. The composite pass draws 3 vertices to the canvas.
+- Clear colours: about `[0.922, 0.902, 0.863, 1]`, the others `[0.965, 0.957, 0.937, 1]` (`--paper` #f6f4ef).
+- Camera: `fov = PI/4` and `dist = h/2 / tan(fov/2)`, so at z = 0, 1 world unit = 1 CSS px.
+- View modes: `solid` skips draws with `wire = 1`, `wire` skips `wire = 0`, and `both` draws all.
+
+## 13. Home and scroll
+
+- Home is the only route that scrolls the document. Lenis is created with `autoRaf: false` and driven by `lenis.raf(now)` in the frame loop, so scroll and drawing advance together.
+- `syncScroll()` sets `html { overflow: hidden }` and `lenis.stop()` off home.
+- Native scrollbars are hidden in CSS.
+- Home `data-gl` leaves take photos in order.
+- The cursor bulge applies only to `boxDraws` with `lift: 1` in page mode, which in practice means the home boxes. The fan has none (`ring = 1` zeroes it), and neither do the work hero and thumbnails (`lift` 0).
+
+## 14. Work route
+
+Slides:
+- `SLIDES = 13`, `SLIDE_PHOTOS = [2, 6, 9, 11, 0, 4, 7, 12, 1, 3, 5, 8, 10]`, `SLIDE_SECONDS = 1.1`. State `slide = { cur, next, k }`.
+- `goTo(i)`:
+  - It sinks the outgoing title, sets `cur = next` and `next = i`, and updates the minimap `aria-current` and `#counter` ("NN / 08").
+  - It calls `centerThumb(i)`, which sets each minimap button's CSS `order` so slide i is third of the five visible and the row wraps around.
+  - It replays the new title after `1.1 * 0.4` s and tweens `k` from 0 to 1 over 1.1 s (0.01 s with reduced motion).
+  - `goTo(i, true)` jumps instantly (`cur = i`, `k = 1`).
+- `step(dir)` runs only on work, list off, and not mid-change (`0 < k < 1`).
+- Keys: ArrowRight/ArrowDown go to the next slide and ArrowLeft/ArrowUp to the previous one.
+- Wheel: one gesture = one slide. The lock releases after 220 ms without wheel events, and `|deltaY| < 10` is ignored.
+- The minimap buttons call `goTo(i)`.
+
+List view:
+- `#list-toggle` ("Index"/"Slides") calls `setList(on)`. `list.v` tweens to 0 or 1 over `LIST_SECONDS = 1.1` with `power3.inOut` (0.01 s instant or reduced). It also toggles `body.work-list` and `aria-pressed`.
+- Opening:
+  - The list is scrolled so the current slide's row is centred (`round(y/period)*period + rowCenter - innerHeight/2`).
+  - The slide title sinks, and the list text plays after 0.55 s.
+- Closing:
+  - The list text sinks and the slide text replays after 1.1 s.
+  - The glide stops, and the list scroll resets to 0 when the tween completes.
+- Escape closes the list.
+
+Infinite list:
+- The thumbnails, the work text and the list wires are drawn for `COPIES = [-1, 0, 1]`, offset by `copy * listPeriod`.
+- The list scroll `listScroll.y` is unbounded. `listBase = y mod listPeriod` (kept positive) is the scroll uniform.
+- Input moves `listScroll.target`: the wheel adds `deltaY`, a drag subtracts pointer dy, and ArrowDown/ArrowUp add ±200. Each frame, y eases by `1 - exp(-dt*8)`.
+
+Hit-testing and hover:
+- `rowAt(x, clientY)` tests `clientY + listBase` against every row in every copy.
+- On pointerup, if the drag moved 6 px or less, the hit row opens (`goTo(i, true)` then `setList(false)`).
+- A `.row-btn` `onclick` acts only when `e.detail === 0` (keyboard or assistive tech).
+- When the list is live (on work, at rest, `list.v > 0.99`, no drag), the hovered row sets `cursor: pointer`. Its thumbnail grows up to 6% about its centre (eased `1 - exp(-dt*10)`), and `grown[o + 7] = hover` lifts it in depth.
+
+Hero morph:
+- Each frame, `rect = lerp(heroRect, thumb of slide.next, list.v)`. The thumb comes from whichever copy has its centre nearest the viewport centre.
+- `rect.y += listBase`, and it is written as `[x, y, w, h, 0, 0, 0, 1]` (depth 1).
+
+## 15. About route
+
+- The fan has `FAN_CARDS = 13` fins, one photo each. It is still by default.
+- Spin only works on about, at rest, and not on a link or button:
+  - pointerdown starts a drag with `cursor: grabbing`.
+  - pointermove: `angle += dx * 0.006`. `vel = clamp(vel*0.6 + (da*60)*0.4, -8, 8)` rad/s.
+  - The wheel adds `deltaY * 0.004` to vel.
+- Each frame when not dragging: `angle += vel*dt`, `vel *= exp(-dt*1.8)`, and vel snaps to 0 below 1e-3. While dragging: `vel *= exp(-dt*8)`, so a held, still pointer settles the wave.
+- The velocity drives the shader wave (section 10).
+
+## 16. Reduced motion (`prefers-reduced-motion: reduce`)
+
+- `REVEAL_SECONDS` is 0.15 instead of 1.6.
+- Split-text shows whole at once.
+- The slide `k` tween and the list tween take 0.01 s.
+- The minimap scrolls with `'auto'`.
+- The cursor bulge is off (hover target 0).
+
+## 17. Contracts (change together)
+
+1. `STRIDE = 8` in `dom-compiler/src/lib.rs` and `src/foam/lib/dom_compiler.ts`, with layout `[x, y, w, h, r, g, b, depth]`. It is used by `fan.ts`, `text_layout.ts`, `pipelines.ts` and `main.ts` (`o + 7` depth, `o + 1`/`o + 3` row y/h, hero write).
+2. `TEXT_STRIDE = 13` = STRIDE + 4 atlas uv + 1 lineBottom. It must match the pipeline attributes (locations 1-4 at offsets 0/16/32/48) and the `vs_text` inputs.
+3. `struct U` field order and alignment in `scene.wgsl` must match the 32-float write in `main.ts` (table in section 9). The uniform buffer is 128 bytes.
+4. Vertex slot 2: `@location(5)` = text reveal progress and `@location(6)` = box photo layer (-1 = none). Every draw must bind one.
+5. Bind group 0 bindings 0-5 (section 8). Layouts in `pipelines.ts` and entries in `main.ts` (`photoEntries`, text extras) must cover what each entry point uses.
+6. `SAMPLES = 4`: pipelines `multisample.count`, the MSAA colour texture and the depth texture.
+7. Fan card size 180x240 (`fan.ts`) = `FIN_W`/`FIN_H` (`scene.wgsl`).
+8. Counts:
+   - `PHOTOS` length 13 = `public/images/00..12.webp` = `FAN_CARDS`.
+   - `SLIDES = 13` = `.slide` blocks = `#work-list` rows = minimap buttons = `public/images/thumbs/` files = the `#counter` total.
+   - `SLIDE_PHOTOS` = the row `data-photo` values = the minimap thumbs = the slide sr-only images.
+   - The `#minimap` CSS width is five 48 px buttons with 6 px gaps, the window `centerThumb` centres in.
+9. Route paths: the `data-route` values, `META` keys (`routes.ts`), `ROUTES` (`vite.config.ts`), `#nav` hrefs and `public/sitemap.xml`. Home must stay index 0.
+10. Text depth +3 layers (`vs_text`) keeps glyphs above the hero (depth 1) and the thumbnails (depth 0..1).
+
+## 18. Conventions
+
+- Third-party packages are imported only in `src/foam/lib/*.ts` (`gsap.ts`, `lenis.ts`, `pretext.ts`, `dom_compiler.ts` for the wasm glue). Website modules import only those adapters. A new package gets a new thin adapter exposing what is used, listed in `dependencies`. Check with `grep -rnE "^import .*'[^.][^']*';" src/foam --include=*.ts`, which should list only `src/foam/lib/` files.
+- Folders are by domain (`lib`, `renderer`, `router`, `scene`, `text`), and file names are snake_case like the origin. WGSL is imported with `?raw`.
+- Code style: single quotes in `src/`, double quotes in `bin/` and `test/`, 2-space indent, semicolons.
+- Comments explain intent in full sentences above the code. Use `/** */` on exported functions. Rust uses `//!` (module) and `///` (items). Use `ponytail:` comments for deliberate shortcuts, naming the ceiling and the upgrade path. No commented-out code.
+- Keep `src/foam` out of scaffolded projects. The `cp` filter in bin/ and `"!src/foam"` in `files` handle this. `npm test` fails on a leak, because it asserts exact `readdir` lists of the generated `src/`.
+- The site origin is only in `.env` (`VITE_SITE_ORIGIN`). robots.txt and sitemap.xml are static copies.
+- Do not bend the template demo or `src/math`, `src/utils`, `src/webgpu` to Foam's needs, because they ship in scaffolded projects.
+
+## 19. Gotchas
+
+- The renderer loads only after `load` + first paint. A tab that is never shown never boots it. Front the tab in automated browsers.
+- WGSL reserved words include `from`, `target`, `filter`, `pass` and `type` (hence `fromTex`).
+- `textureSample` needs uniform control flow. Sample before `discard` (`fs_text`) or unconditionally with a clamped layer (`fs_solid`).
+- Use one uniform buffer per draw: `queue.writeBuffer` calls land before the submitted passes, so a shared buffer would give every draw the last value.
+- The MSAA sample count must match across pipelines, the colour target and the depth target. The resolve targets and the composite are single-sample.
+- Depth layer = 4 px. Text is at +3 layers (+12 px). Translucent pipelines don't write depth.
+- Never `display: none` a GL element or route, because its rect becomes 0. Use `opacity` or `visibility`.
+- Colours must compute to `rgb()`/`rgba()` (hex, named, rgb). Anything else (for example `oklch()`, `color()`) falls back to white in `parse_rgb`.
+- Index buffers are `uint16`. The 289-vertex grid fits.
+- Text advances ignore kerning, so lines can drift a few px from the DOM.
+- `recompile()` runs on every route-root resize. Everything allocated per compile must go into `owned`.
+- On Windows, the scaffolder test links `node_modules` with a junction (directory symlinks need privileges).
+
+## 20. Definition of done
+
+1. `npx tsc --noEmit` passes.
+2. `npm test` passes.
+3. `npm run test:wasm` passes.
+4. `npm run build` passes.
+5. `/`, `/about` and `/work` work in a WebGPU browser: the route reveals, the Solid, Wire and Both modes, work slides (keys, wheel, minimap) and the list view (open, scroll, hover, click, Escape), the about fan (drag, wheel) and reduced motion. There are no console errors.
+6. Lighthouse scores 100 in Performance, Accessibility, Best Practices and SEO on `/`, `/about` and `/work`, against `npm run build && npm run preview`.
+
+## 21. File-by-file reference
+
+Root:
+- `foam.html`: Foam markup + inline CSS (section 4). The CSS tokens are `--ink #16140f`, `--muted #6b655b`, `--paper #f6f4ef`, `--gutter max(24px, 7vw)`. At `@media (max-width: 720px)` the layout is single-column and `#work-ui` moves to bottom 72px.
+- `index.html`: the template demo page (`/src/main.ts`).
+- `vite.config.ts`: the `foam-routes` plugin (`ROUTES = {'/', '/about', '/work'}`, rewrite to `/foam.html?query`, preview cache headers). `build.modulePreload.polyfill = false`, and `rollupOptions.input = { index, foam }`.
+- `tsconfig.json`: ES2022, bundler resolution, `types: ["@webgpu/types", "vite/client"]`, strict, `include: ["src"]`.
+- `package.json`: scripts (section 2), `files`, `dependencies`, `devDependencies`. `prepublishOnly` = `npm test && npm run build`.
+- `.env`: `VITE_SITE_ORIGIN` (git-ignored).
+- `.gitignore`: `node_modules`, `dist`, `.DS_Store`, `.env`, `dom-compiler/target`, `src/foam/lib/wasm/`.
+- `AGENTS.md`, `CLAUDE.md` (imports AGENTS.md), `llms.txt`, `llms-full.txt`: agent and LLM docs. `README.md`: the scaffolder docs.
+
+src/foam:
+- `boot.ts`: entry. `applyMeta(routeIndex())`, then a dynamic `import('./main')` after load + paint.
+- `main.ts`: everything stateful. Constants: `REDUCED`, `REVEAL_SECONDS` 1.6/0.15, `REVEAL_AT` 0.9, `GLYPH_SECONDS` 1.4, `SLIDES` 13, `SLIDE_SECONDS` 1.1, `LIST_SECONDS` 1.1, `SLIDE_PHOTOS`, `COPIES`. It holds `compileScenes`/`recompile`, `play`/`sink`/`replay`, `goTo`/`step`, `setList`, `rowAt`, `openRow`, `onRoute`, `syncScroll` and `frame`.
+- `lib/dom_compiler.ts`: `STRIDE`, `initDomCompiler()`, `compileRects(root, selector, colorProp): Float32Array`.
+- `lib/gsap.ts`: `export { gsap }`.
+- `lib/lenis.ts`: `SmoothScroll` type, `createSmoothScroll()` (`new Lenis({ autoRaf: false })`). Imports `lenis/dist/lenis.css`.
+- `lib/pretext.ts`: `PreparedText`, `prepareText(text, font)` (`prepareWithSegments`), `breakLines(prepared, maxWidth, lineHeight): string[]` (`layoutWithLines`).
+- `lib/wasm/`: generated wasm-bindgen glue (`dom_compiler.js` default `init`, `compile`).
+- `renderer/pipelines.ts`: `SAMPLES`, `createPipelines(device, format)`, which returns `{ boxLayout, textLayout, pipelines, composite }`.
+- `renderer/scene.wgsl`, `renderer/composite.wgsl`: section 10.
+- `router/routes.ts`: `routeIndex()`, `applyMeta(i)`. It reads `VITE_SITE_ORIGIN`.
+- `scene/grid_mesh.ts`: `gridMesh()` returns `{ uvs: Float32Array, tris: Uint16Array, lines: Uint16Array }`.
+- `scene/photos.ts`: `PHOTOS` (`/images/00.webp`..`/images/12.webp`) and `loadPhotos(device)`, which returns `{ texture, aspects }`. `LAYER_SIZE = 1024`.
+- `scene/fan.ts`: `FAN_CARDS`, `fanCards()`, `fanPhotos()`.
+- `text/text_layout.ts`: `TEXT_STRIDE`, `warmText(el)`, `layoutText(elements, rects, atlas): TextLayout`. Constants `DELAY`, `ATLAS_WIDTH = 2048`, `PAD = 1`.
+
+Shared template helpers used by Foam:
+- `src/webgpu/utils.ts`: `initializeWebGPU(canvas)` returns `{ device, context, format }`. `createBufferWithData(device, label, data, usage)` adds COPY_DST. `resizeCanvasToDisplaySize(canvas, max)` sizes the canvas at CSS px * devicePixelRatio and returns true when it changed.
+- `src/math/mat4.ts`: `multiply`, `perspective`, `lookAt` (plus `identity`, `translation`, `scaling`, `rotationX`, `rotationY` for the demo).
+- `src/utils/dom.ts`: `requiredElement(selector)`.
+
+dom-compiler:
+- `Cargo.toml`: `crate-type = ["cdylib", "rlib"]`, `wasm-bindgen = "0.2"`, `web-sys = "0.3"` (Window, Element, NodeList, DomRect, CssStyleDeclaration), release `opt-level = "s"`.
+- `src/lib.rs`:
+  - `pub const STRIDE: usize = 8`.
+  - `#[wasm_bindgen] pub fn compile(root: &Element, selector: &str, color_prop: &str) -> Result<Vec<f32>, JsValue>`.
+  - `layer_depth(el)` counts `data-gl` ancestors.
+  - `parse_rgb(s)` parses `rgb(`/`rgba(` with `,`, `/` or space separators, and returns None when alpha is 0 or there are fewer than 3 numbers.
+  - Test `parses_computed_colours`.
+
+public:
+- `images/00.webp`..`12.webp`: the photos.
+- `images/thumbs/{02,06,09,11,00,04,07,12}.webp`: minimap thumbs (`<img width="76" height="48">`, static in foam.html, painted before the GPU starts).
+- `robots.txt`, `sitemap.xml` (3 URLs), `favicon.ico`.
+
+Scaffolder:
+- `bin/create-vite-webgpu-project.js`:
+  - Options: `--scene default|cube|sphere|none`, `--rotate`/`--no-rotate`, `--gui`/`--no-gui`, `--install`/`--no-install`, `-h`/`--help`. It prompts on a TTY.
+  - It copies `src/` without `src/foam`, deletes `demoConfig.ts` and overlays `template/<variant>` files. It writes package.json and .gitignore, and copies `index.html`, `tsconfig.json`, `template/assets/webgpu.ico` (as public/favicon.ico) and a README variant.
+- `template/`: the variant sources (`Renderer.ts`, `main.ts`, `SettingsGui.ts`, shapes, `meshShader.ts`, READMEs, assets).
+- `test/create-project.test.js`: 6 `node:test` cases. They run the CLI with `--no-install` in a temp directory, assert generated files and contents, link `node_modules` and run tsc + vite build on the result.

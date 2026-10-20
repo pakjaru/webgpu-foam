@@ -1,20 +1,20 @@
-import init, { compile } from './pkg/dom_compiler.js';
-import shaderCode from './shader.wgsl?raw';
-import compositeCode from './composite.wgsl?raw';
-import gsap from 'gsap';
-import { layoutText, TEXT_STRIDE, warmText } from './text';
+import { compileRects, initDomCompiler, STRIDE } from './lib/dom_compiler';
+import { gsap } from './lib/gsap';
+import { createSmoothScroll } from './lib/lenis';
+import { createPipelines, SAMPLES } from './renderer/pipelines';
+import { applyMeta, routeIndex } from './router/routes';
+import { FAN_CARDS, fanCards, fanPhotos } from './scene/fan';
+import { gridMesh } from './scene/grid_mesh';
+import { loadPhotos, PHOTOS } from './scene/photos';
+import { layoutText, TEXT_STRIDE, warmText } from './text/text_layout';
 import { lookAt, multiply, perspective } from '../math/mat4';
 import { requiredElement } from '../utils/dom';
-import { applyMeta, routeIndex } from './boot';
 import { createBufferWithData, initializeWebGPU, resizeCanvasToDisplaySize } from '../webgpu/utils';
 
-// Rust (wasm) owns DOM -> instance-buffer compilation, pretext owns text line
-// layout, this file owns the GPU. Each route is its own scene rendered to its
-// own texture; a composite pass mixes them with a droplet reveal.
-const N = 16; // grid subdivisions per element
-const SAMPLES = 4; // MSAA for the scene passes; resolved into each scene texture
-const STRIDE = 8; // floats per instance, must match dom-compiler/src/lib.rs
-const FAN_CARDS = 13; // one fin per photo
+// The renderer: Rust (wasm) compiles the DOM into instance buffers, pretext
+// lays out the text, and this file owns the GPU, the routes and the input.
+// Each route is its own scene rendered to its own texture; a composite pass
+// reveals one through the other with a growing circle.
 // Reduced motion: the circle reveal is near-instant and text appears whole.
 const REDUCED = matchMedia('(prefers-reduced-motion: reduce)').matches;
 const REVEAL_SECONDS = REDUCED ? 0.15 : 1.6;
@@ -32,54 +32,13 @@ const routes = [...document.querySelectorAll<HTMLElement>('[data-route]')].map((
 }));
 const ABOUT = routes.findIndex((r) => r.path === '/about');
 const WORK = routes.findIndex((r) => r.path === '/work');
-const SLIDES = 4;
+const SLIDES = 13;
 const SLIDE_SECONDS = 1.1;
-// Photos (public/images, webp). Each goes into one square texture array
-// layer; its real aspect is kept separately for cover-cropping.
-const PHOTOS = Array.from({ length: 13 }, (_, i) => `/images/${String(i).padStart(2, '0')}.webp`);
-const LAYER_SIZE = 1024;
-const SLIDE_PHOTOS = [2, 6, 9, 11]; // which photos the work slides use
-
-async function loadPhotos(device: GPUDevice) {
-  const bitmaps = await Promise.all(PHOTOS.map(async (url) => createImageBitmap(await (await fetch(url)).blob())));
-  const texture = device.createTexture({
-    size: [LAYER_SIZE, LAYER_SIZE, PHOTOS.length],
-    format: 'rgba8unorm',
-    usage: GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.COPY_DST | GPUTextureUsage.RENDER_ATTACHMENT,
-  });
-  for (const [z, bitmap] of bitmaps.entries()) {
-    const square = await createImageBitmap(bitmap, { resizeWidth: LAYER_SIZE, resizeHeight: LAYER_SIZE, resizeQuality: 'high' });
-    device.queue.copyExternalImageToTexture({ source: square }, { texture, origin: [0, 0, z] }, [LAYER_SIZE, LAYER_SIZE]);
-    await new Promise((r) => setTimeout(r)); // one upload per task keeps the main thread responsive
-  }
-  const aspects = createBufferWithData(device, 'aspects', new Float32Array(bitmaps.map((b) => b.width / b.height)), GPUBufferUsage.STORAGE);
-  return { texture, aspects };
-}
-
-function gridMesh() {
-  const uvs: number[] = [];
-  for (let y = 0; y <= N; y++) for (let x = 0; x <= N; x++) uvs.push(x / N, y / N);
-  const id = (x: number, y: number) => y * (N + 1) + x;
-  const tris: number[] = [];
-  for (let y = 0; y < N; y++)
-    for (let x = 0; x < N; x++)
-      tris.push(id(x, y), id(x + 1, y), id(x, y + 1), id(x + 1, y), id(x + 1, y + 1), id(x, y + 1));
-  // Wire = element outline only, along grid vertices.
-  const lines: number[] = [];
-  for (let i = 0; i < N; i++)
-    lines.push(id(i, 0), id(i + 1, 0), id(i, N), id(i + 1, N), id(0, i), id(0, i + 1), id(N, i), id(N, i + 1));
-  return { uvs: new Float32Array(uvs), tris: new Uint16Array(tris), lines: new Uint16Array(lines) };
-}
-
-/** Fan fins for the about scene: equal 180x240 cards (the shader sizes them; rect drives the photo crop). */
-function fanCards(): Float32Array<ArrayBuffer> {
-  const out = new Float32Array(FAN_CARDS * STRIDE);
-  for (let i = 0; i < FAN_CARDS; i++) out.set([0, 0, 180, 240, 0.5, 0.5, 0.5, 0], i * STRIDE);
-  return out;
-}
+const LIST_SECONDS = 1.1; // work: slideshow <-> list view
+const SLIDE_PHOTOS = [2, 6, 9, 11, 0, 4, 7, 12, 1, 3, 5, 8, 10]; // every photo, in slide order
 
 async function main(): Promise<void> {
-  await Promise.all([init(), document.fonts.ready]);
+  await Promise.all([initDomCompiler(), document.fonts.ready]);
   const { device, context, format } = await initializeWebGPU(canvas);
   context.configure({ device, format, alphaMode: 'opaque' });
 
@@ -90,73 +49,6 @@ async function main(): Promise<void> {
   const sampler = device.createSampler({ magFilter: 'linear', minFilter: 'linear' });
   const fan = createBufferWithData(device, 'fan', fanCards(), GPUBufferUsage.VERTEX);
 
-  const module = device.createShaderModule({ code: shaderCode });
-  // Everything but solid text binds the photos too.
-  const boxLayout = device.createBindGroupLayout({
-    entries: [
-      { binding: 0, visibility: GPUShaderStage.VERTEX, buffer: {} },
-      { binding: 2, visibility: GPUShaderStage.FRAGMENT, sampler: {} },
-      { binding: 3, visibility: GPUShaderStage.FRAGMENT, texture: { viewDimension: '2d-array' } },
-      { binding: 4, visibility: GPUShaderStage.FRAGMENT, buffer: {} },
-      { binding: 5, visibility: GPUShaderStage.VERTEX | GPUShaderStage.FRAGMENT, buffer: { type: 'read-only-storage' } },
-    ],
-  });
-  const textLayout = device.createBindGroupLayout({
-    entries: [
-      { binding: 0, visibility: GPUShaderStage.VERTEX, buffer: {} },
-      { binding: 1, visibility: GPUShaderStage.FRAGMENT, texture: {} },
-      { binding: 2, visibility: GPUShaderStage.FRAGMENT, sampler: {} },
-    ],
-  });
-  const alpha: GPUBlendState = {
-    color: { srcFactor: 'src-alpha', dstFactor: 'one-minus-src-alpha' },
-    alpha: { srcFactor: 'one', dstFactor: 'one-minus-src-alpha' },
-  };
-
-  const pipeline = (
-    topology: GPUPrimitiveTopology,
-    vsEntry: string,
-    fsEntry: string,
-    stride: number,
-    layout: GPUBindGroupLayout,
-    blend?: GPUBlendState,
-  ) =>
-    device.createRenderPipeline({
-      layout: device.createPipelineLayout({ bindGroupLayouts: [layout] }),
-      vertex: {
-        module,
-        entryPoint: vsEntry,
-        buffers: [
-          { arrayStride: 8, attributes: [{ shaderLocation: 0, offset: 0, format: 'float32x2' }] },
-          {
-            arrayStride: stride * 4,
-            stepMode: 'instance',
-            attributes: [
-              { shaderLocation: 1, offset: 0, format: 'float32x4' },
-              { shaderLocation: 2, offset: 16, format: 'float32x4' },
-              ...(stride === TEXT_STRIDE
-                ? [
-                    { shaderLocation: 3, offset: 32, format: 'float32x4' as const },
-                    { shaderLocation: 4, offset: 48, format: 'float32' as const },
-                  ]
-                : []),
-            ],
-          },
-          // Slot 2, one float per instance: per-glyph reveal progress for
-          // text, photo layer (-1 = none) for boxes.
-          {
-            arrayStride: 4,
-            stepMode: 'instance',
-            attributes: [{ shaderLocation: stride === TEXT_STRIDE ? 5 : 6, offset: 0, format: 'float32' }],
-          },
-        ],
-      },
-      fragment: { module, entryPoint: fsEntry, targets: [{ format, blend }] },
-      primitive: { topology },
-      multisample: { count: SAMPLES },
-      // Text is translucent: test against depth but don't write it.
-      depthStencil: { format: 'depth24plus', depthWriteEnabled: !blend, depthCompare: 'less-equal' },
-    });
   const photos = await loadPhotos(device);
   const slideUniform = device.createBuffer({ size: 16, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
   const photoEntries: GPUBindGroupEntry[] = [
@@ -166,20 +58,7 @@ async function main(): Promise<void> {
     { binding: 5, resource: { buffer: photos.aspects } },
   ];
 
-  const pipelines = {
-    image: pipeline('triangle-list', 'vs_image', 'fs_image', STRIDE, boxLayout),
-    boxSolid: pipeline('triangle-list', 'vs', 'fs_solid', STRIDE, boxLayout),
-    boxWire: pipeline('line-list', 'vs', 'fs_wire', STRIDE, boxLayout),
-    textSolid: pipeline('triangle-list', 'vs_text', 'fs_text', TEXT_STRIDE, textLayout, alpha),
-    textWire: pipeline('line-list', 'vs_text', 'fs_wire', TEXT_STRIDE, boxLayout),
-  };
-
-  const compositeModule = device.createShaderModule({ code: compositeCode });
-  const composite = device.createRenderPipeline({
-    layout: 'auto',
-    vertex: { module: compositeModule, entryPoint: 'vs' },
-    fragment: { module: compositeModule, entryPoint: 'fs', targets: [{ format }] },
-  });
+  const { boxLayout, textLayout, pipelines, composite } = createPipelines(device, format);
   const compositeUniform = device.createBuffer({ size: 16, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
 
   interface Draw {
@@ -195,6 +74,8 @@ async function main(): Promise<void> {
     scene: number;
     slot2: GPUBuffer; // reveal progress (text) or photo layers (boxes)
     lift?: number; // 1 = swells under the cursor
+    list?: number; // 1 = fades with the work list view
+    copy?: number; // work list repeat: drawn one list period (k * H) further down
   }
 
   // Split-text state. `time` per text element survives recompiles (resize);
@@ -214,6 +95,16 @@ async function main(): Promise<void> {
   }
   const reveals: (Reveal | null)[] = routes.map(() => null);
   let draws: Draw[] = [];
+  // Work hero image: its layout rect, the per-frame buffer, and the list thumbnails it can shrink into.
+  let heroRect = new Float32Array(4);
+  let heroBuffer: GPUBuffer | null = null;
+  let listThumbs = new Float32Array(0);
+  // Work list rows (doc px, x/y/w/h per row) and the repeat period: the list is
+  // drawn three times, one period apart, and scrolled modulo the period.
+  let listRows = new Float32Array(0);
+  let listPeriod = 1;
+  let thumbBuffer: GPUBuffer | null = null;
+  const COPIES = [-1, 0, 1];
   let owned: { destroy(): void }[] = [];
   const atlases = routes.map(() => document.createElement('canvas'));
 
@@ -226,7 +117,7 @@ async function main(): Promise<void> {
     extra: GPUBindGroupEntry[] = photoEntries,
     layout = extra === photoEntries ? boxLayout : textLayout,
   ) => {
-    const uniform = device.createBuffer({ size: 112, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
+    const uniform = device.createBuffer({ size: 128, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
     owned.push(uniform);
     const bindGroup = device.createBindGroup({ layout, entries: [{ binding: 0, resource: { buffer: uniform } }, ...extra] });
     draws.push({ ...d, uniform, bindGroup, instances, count });
@@ -242,7 +133,7 @@ async function main(): Promise<void> {
   };
   const noPhotos = (count: number) => vertexBuffer('no-photos', new Float32Array(count).fill(-1));
   // Fan panes cycle through every photo.
-  const fanPhotos = createBufferWithData(device, 'fan-photos', Float32Array.from({ length: FAN_CARDS }, (_, i) => i % PHOTOS.length), GPUBufferUsage.VERTEX);
+  const fanLayers = createBufferWithData(device, 'fan-photos', fanPhotos(), GPUBufferUsage.VERTEX);
 
   // Yields after each route so the first compile can be spread across tasks.
   const compileScenes = function* () {
@@ -252,27 +143,49 @@ async function main(): Promise<void> {
 
     let photo = 0;
     for (const [scene, { root }] of routes.entries()) {
-      if (scene === ABOUT) boxDraws(scene, fan, FAN_CARDS, 1, fanPhotos);
-      const boxes = new Float32Array(compile(root, '[data-gl]', 'background-color'));
+      if (scene === ABOUT) boxDraws(scene, fan, FAN_CARDS, 1, fanLayers);
+      const boxes = compileRects(root, '[data-gl]', 'background-color');
       if (boxes.length) {
-        // Leaf panes get the next photo; containers (e.g. the grid) keep their colour.
-        const layers = [...root.querySelectorAll('[data-gl]')].map((el) =>
-          el.querySelector('[data-gl]') ? -1 : photo++ % PHOTOS.length,
+        // Leaf panes get the next photo (or their data-photo); containers keep their colour.
+        const layers = [...root.querySelectorAll<HTMLElement>('[data-gl]')].map((el) =>
+          el.dataset.photo ? Number(el.dataset.photo) : el.querySelector('[data-gl]') ? -1 : photo++ % PHOTOS.length,
         );
-        boxDraws(scene, vertexBuffer('boxes', boxes), boxes.length / STRIDE, 0, vertexBuffer('photos', Float32Array.from(layers)));
+        const inst = vertexBuffer('boxes', boxes);
+        const slot2 = vertexBuffer('photos', Float32Array.from(layers));
+        if (scene === WORK) {
+          thumbBuffer = device.createBuffer({ size: boxes.byteLength, usage: GPUBufferUsage.VERTEX | GPUBufferUsage.COPY_DST });
+          owned.push(thumbBuffer);
+          device.queue.writeBuffer(thumbBuffer, 0, boxes);
+          // Work's only boxes are the list thumbnails: they fade with the list view.
+          listThumbs = boxes;
+          listRows = compileRects(root, '#work-list .row-btn', 'color');
+          const n = listRows.length / STRIDE;
+          const gap = n > 1 ? listRows[STRIDE + 1] - (listRows[1] + listRows[3]) : 0;
+          listPeriod = Math.max(1, listRows[(n - 1) * STRIDE + 1] + listRows[(n - 1) * STRIDE + 3] + gap - listRows[1]);
+          for (const copy of COPIES) {
+            addDraw({ pipeline: pipelines.boxFade, index: triBuf, n: mesh.tris.length, wire: 0, ring: 0, scene, slot2, list: 1, copy }, thumbBuffer, boxes.length / STRIDE);
+            addDraw({ pipeline: pipelines.boxWire, index: lineBuf, n: mesh.lines.length, wire: 1, ring: 0, scene, slot2, list: 1, copy }, thumbBuffer, boxes.length / STRIDE);
+          }
+        } else boxDraws(scene, inst, boxes.length / STRIDE, 0, slot2);
       }
-      const imgs = new Float32Array(compile(root, '[data-gl-image]', 'background-color'));
-      if (imgs.length)
+      const imgs = compileRects(root, '[data-gl-image]', 'background-color');
+      if (imgs.length) {
+        // The work image is rewritten per frame so it can shrink into a list row.
+        heroRect = imgs.slice(0, 4);
+        heroBuffer = device.createBuffer({ size: STRIDE * 4, usage: GPUBufferUsage.VERTEX | GPUBufferUsage.COPY_DST });
+        owned.push(heroBuffer);
+        device.queue.writeBuffer(heroBuffer, 0, imgs.subarray(0, STRIDE));
         addDraw(
-          { pipeline: pipelines.image, index: triBuf, n: mesh.tris.length, wire: 0, ring: 0, scene, slot2: noPhotos(imgs.length / STRIDE) }, // no cursor bulge on the work slideshow
-          vertexBuffer('images', imgs),
-          imgs.length / STRIDE,
+          { pipeline: pipelines.image, index: triBuf, n: mesh.tris.length, wire: 0, ring: 0, scene, slot2: noPhotos(1) }, // no cursor bulge on the work slideshow
+          heroBuffer,
+          1,
         );
+      }
 
       yield;
       const atlas = atlases[scene];
       const textEls = [...root.querySelectorAll('[data-gl-text]')];
-      const text = layoutText(textEls, new Float32Array(compile(root, '[data-gl-text]', 'color')), atlas);
+      const text = layoutText(textEls, compileRects(root, '[data-gl-text]', 'color'), atlas);
       const glyphCount = text.data.length / TEXT_STRIDE;
       reveals[scene] = null;
       if (glyphCount) {
@@ -288,15 +201,19 @@ async function main(): Promise<void> {
         });
         device.queue.copyExternalImageToTexture({ source: atlas }, { texture }, [atlas.width, atlas.height]);
         owned.push(texture);
-        addDraw({ pipeline: pipelines.textSolid, index: triBuf, n: mesh.tris.length, wire: 0, ring: 0, scene, slot2: buffer }, inst, glyphCount, [
-          { binding: 1, resource: texture.createView() },
-          { binding: 2, resource: sampler },
-        ]);
-        addDraw({ pipeline: pipelines.textWire, index: lineBuf, n: mesh.lines.length, wire: 1, ring: 0, scene, slot2: buffer }, inst, glyphCount);
+        // Work text repeats with the list (slide titles in the extra copies sit a
+        // whole period off screen).
+        for (const copy of scene === WORK ? COPIES : [0]) {
+          addDraw({ pipeline: pipelines.textSolid, index: triBuf, n: mesh.tris.length, wire: 0, ring: 0, scene, slot2: buffer, copy }, inst, glyphCount, [
+            { binding: 1, resource: texture.createView() },
+            { binding: 2, resource: sampler },
+          ]);
+          addDraw({ pipeline: pipelines.textWire, index: lineBuf, n: mesh.lines.length, wire: 1, ring: 0, scene, slot2: buffer, copy }, inst, glyphCount);
+        }
       }
 
       // Frames: wire-only outlines around text wrappers and text blocks.
-      const frames = new Float32Array(compile(root, '[data-gl-frame], [data-gl-text]:not([data-slide])', 'color'));
+      const frames = compileRects(root, '[data-gl-frame], [data-gl-text]:not([data-slide]):not([data-list])', 'color');
       if (frames.length)
         addDraw(
           { pipeline: pipelines.boxWire, index: lineBuf, n: mesh.lines.length, wire: 1, ring: 0, scene, slot2: noPhotos(frames.length / STRIDE) },
@@ -332,6 +249,13 @@ async function main(): Promise<void> {
   let from = routeIndex();
   let to = from;
   let p = 0;
+  // Smooth scroll. Lenis moves the real window scroll; the renderer reads it.
+  const lenis = createSmoothScroll();
+  // Scroll each scene was left at: the outgoing scene keeps it while the
+  // reveal plays, so it doesn't jump to the top under the circle.
+  const sceneScroll = routes.map(() => 0);
+  // Work list view: `v` runs 0 (slideshow) -> 1 (list).
+  const list = { v: 0, on: false };
   // Split-text triggers: a text block reveals the first time it is in view
   // during a route visit (scrolled to, or its route entered).
   const inView = new Set<Element>();
@@ -340,8 +264,9 @@ async function main(): Promise<void> {
   // Work slides: `cur` shows, `next` rises over it while `k` runs 0 -> 1.
   const slide = { cur: 0, next: 0, k: 0 };
   const isHiddenSlide = (el: Element) => {
-    const s = (el as HTMLElement).dataset.slide;
-    return s !== undefined && Number(s) !== slide.next;
+    const { slide: s, list: inList } = (el as HTMLElement).dataset;
+    if (inList !== undefined) return !list.on;
+    return s !== undefined && (list.on || Number(s) !== slide.next);
   };
   const play = (el: Element) => {
     if (played.has(el) || isHiddenSlide(el)) return;
@@ -372,40 +297,182 @@ async function main(): Promise<void> {
   const pad = (n: number) => String(n).padStart(2, '0');
   // Thumbnails are static in foam.html (small files, painted before the GPU starts).
   const thumbs = [...document.querySelectorAll<HTMLButtonElement>('#minimap button')];
-  thumbs.forEach((b, i) => (b.onclick = () => goTo(i)));
+  // The minimap shows five thumbnails with the current one in the middle and
+  // wraps around: CSS `order` rotates the row so slide i always sits third.
+  const centerThumb = (i: number) => thumbs.forEach((b, j) => (b.style.order = String((j - i + 2 + SLIDES) % SLIDES)));
+  // Like wheel and keys, a thumbnail click waits for a running slide change to finish.
+  const sliding = () => slide.k > 0 && slide.k < 1;
+  thumbs.forEach((b, i) => (b.onclick = () => !sliding() && goTo(i)));
   const slideText = (i: number) => routes[WORK].root.querySelectorAll(`[data-slide="${i}"]`);
-  const goTo = (i: number) => {
+  const replay = (el: Element, delay: number) => {
+    played.delete(el);
+    gsap.killTweensOf(timeOf(el));
+    timeOf(el).time = 0;
+    gsap.delayedCall(delay, () => play(el));
+  };
+  const sink = (el: Element) => gsap.to(timeOf(el), { time: 0, duration: 0.5, ease: 'power2.in', overwrite: true });
+  const goTo = (i: number, instant = false) => {
     if (i === slide.next) return;
     // The outgoing title sinks back under its mask; the new one rises.
-    for (const el of slideText(slide.next)) gsap.to(timeOf(el), { time: 0, duration: 0.5, ease: 'power2.in', overwrite: true });
+    for (const el of slideText(slide.next)) sink(el);
     slide.cur = slide.next;
     slide.next = i;
-    for (const el of slideText(i)) {
-      played.delete(el);
-      gsap.killTweensOf(timeOf(el));
-      timeOf(el).time = 0;
-      gsap.delayedCall(SLIDE_SECONDS * 0.4, () => play(el));
-    }
-    gsap.fromTo(slide, { k: 0 }, { k: 1, duration: REDUCED ? 0.01 : SLIDE_SECONDS, ease: 'none', overwrite: true });
     thumbs.forEach((b, j) => b.toggleAttribute('aria-current', j === i));
     counter.textContent = `${pad(i + 1)} / ${pad(SLIDES)}`;
+    centerThumb(i);
+    if (instant) {
+      // Jump straight to slide i (its title plays when the slideshow returns).
+      gsap.killTweensOf(slide);
+      slide.cur = i;
+      slide.k = 1;
+      return;
+    }
+    for (const el of slideText(i)) replay(el, SLIDE_SECONDS * 0.4);
+    gsap.fromTo(slide, { k: 0 }, { k: 1, duration: REDUCED ? 0.01 : SLIDE_SECONDS, ease: 'none', overwrite: true });
   };
 
-  // Work navigation: arrow keys and wheel step through slides, one per gesture.
+  // Work navigation: arrow keys and wheel step through slides. A wheel gesture
+  // (including trackpad momentum) moves exactly one slide: the lock releases
+  // only after the wheel has been quiet for a moment.
   const step = (dir: number) => {
-    if (to !== WORK || (slide.k > 0 && slide.k < 1)) return;
+    // A slide change plays out in full before the next one can start.
+    if (to !== WORK || list.on || sliding()) return;
     goTo((slide.next + dir + SLIDES) % SLIDES);
   };
   addEventListener('keydown', (e) => {
+    if (e.key === 'Escape' && list.on) setList(false);
     if (e.key === 'ArrowRight' || e.key === 'ArrowDown') step(1);
     if (e.key === 'ArrowLeft' || e.key === 'ArrowUp') step(-1);
   });
-  addEventListener('wheel', (e) => Math.abs(e.deltaY) > 20 && step(Math.sign(e.deltaY)), { passive: true });
+  let wheelLock = false;
+  let wheelTimer = 0;
+  addEventListener(
+    'wheel',
+    (e) => {
+      if (to !== WORK || list.on) return;
+      clearTimeout(wheelTimer);
+      wheelTimer = setTimeout(() => (wheelLock = false), 220);
+      if (wheelLock || Math.abs(e.deltaY) < 10) return;
+      wheelLock = true;
+      step(Math.sign(e.deltaY));
+    },
+    { passive: true },
+  );
+
+  // Work list view. The hero image shrinks into its row while the other rows
+  // fade in; every part is a tween that a new toggle simply overwrites.
+  const listToggle = requiredElement<HTMLButtonElement>('#list-toggle');
+  const listText = () => routes[WORK].root.querySelectorAll('[data-list]');
+  // Only home scrolls the document (with Lenis); the work list scrolls itself.
+  const allowScroll = () => to === 0;
+  // List scroll, unbounded: rows are drawn modulo `listPeriod`, so it never ends.
+  const listScroll = { y: 0, target: 0 };
+  const listBase = () => ((listScroll.y % listPeriod) + listPeriod) % listPeriod;
+  const rowCenter = (i: number) => listRows[i * STRIDE + 1] + listRows[i * STRIDE + 3] / 2;
+  const syncScroll = () => {
+    document.documentElement.style.overflow = allowScroll() ? '' : 'hidden';
+    if (allowScroll()) lenis.start();
+    else lenis.stop();
+  };
+  const setList = (on: boolean, instant = false) => {
+    if (on === list.on) return;
+    list.on = on;
+    document.body.classList.toggle('work-list', on);
+    listToggle.ariaPressed = String(on);
+    listToggle.textContent = on ? 'Slides' : 'Index';
+    for (const id of ['#nav', '#view']) requiredElement(id).classList.toggle('on-dark', to === WORK && !on);
+    gsap.to(list, {
+      v: on ? 1 : 0,
+      duration: instant || REDUCED ? 0.01 : LIST_SECONDS,
+      ease: 'power3.inOut',
+      overwrite: true,
+      // Once the rows have faded out, return the list to its origin so the
+      // slideshow's own text (which shares the list's scroll) sits unshifted.
+      onComplete: () => void (!list.on && (listScroll.y = listScroll.target = 0)),
+    });
+    if (on) {
+      // Open with the current slide's row in the middle of the screen, so the
+      // image always shrinks to the centre whatever its index.
+      const y = Math.round(listScroll.y / listPeriod) * listPeriod + rowCenter(slide.next) - innerHeight / 2;
+      listScroll.y = listScroll.target = y;
+      for (const el of slideText(slide.next)) sink(el);
+      for (const el of listText()) {
+        played.delete(el);
+        gsap.killTweensOf(timeOf(el));
+        timeOf(el).time = 0;
+        gsap.delayedCall(LIST_SECONDS * 0.5, () => play(el));
+      }
+    } else {
+      for (const el of listText()) {
+        gsap.killTweensOf(timeOf(el));
+        if (instant) timeOf(el).time = 0;
+        else sink(el);
+      }
+      // Titles rise once the list has gone (and its scroll has reset).
+      for (const el of slideText(slide.next)) replay(el, instant ? 0 : LIST_SECONDS);
+      listScroll.target = listScroll.y; // stop any glide: no scrolling while it closes
+      if (instant) listScroll.y = listScroll.target = 0;
+    }
+    syncScroll();
+  };
+  // List input: wheel and drag move the target; the frame loop eases toward it.
+  const drag = { active: false, y: 0, moved: 0 };
+  addEventListener('wheel', (e) => to === WORK && list.on && (listScroll.target += e.deltaY), { passive: true });
+  addEventListener('pointerdown', (e) => {
+    if (to !== WORK || !list.on || (e.target as Element).closest('a, button')) return;
+    Object.assign(drag, { active: true, y: e.clientY, moved: 0 });
+  });
+  addEventListener('pointermove', (e) => {
+    if (!drag.active) return;
+    listScroll.target -= e.clientY - drag.y;
+    drag.moved += Math.abs(e.clientY - drag.y);
+    drag.y = e.clientY;
+  });
+  /** The list row under a viewport point, in whichever drawn copy it lands, or -1. */
+  const rowAt = (x: number, clientY: number) => {
+    const y = clientY + listBase();
+    for (const k of COPIES)
+      for (let i = 0; i < listRows.length / STRIDE; i++) {
+        const [rx, ry, rw, rh] = listRows.subarray(i * STRIDE, i * STRIDE + 4);
+        const top = ry + k * listPeriod;
+        if (x >= rx && x <= rx + rw && y >= top && y <= top + rh) return i;
+      }
+    return -1;
+  };
+  // Hovered row (-1 none) and each row's eased hover amount, for the image grow.
+  let hoverRow = -1;
+  let hoverX = 0;
+  let hoverY = 0;
+  const rowHover = new Float32Array(SLIDES);
+  addEventListener('pointermove', (e) => ([hoverX, hoverY] = [e.clientX, e.clientY]));
+  addEventListener('pointerup', (e) => {
+    if (!drag.active) return;
+    drag.active = false;
+    if (drag.moved > 6) return;
+    const i = rowAt(e.clientX, e.clientY);
+    if (i >= 0) openRow(i);
+  });
+  addEventListener('keydown', (e) => {
+    if (to !== WORK || !list.on) return;
+    if (e.key === 'ArrowDown') listScroll.target += 200;
+    if (e.key === 'ArrowUp') listScroll.target -= 200;
+  });
+  listToggle.onclick = () => setList(!list.on);
+  const openRow = (i: number) => {
+    goTo(i, true);
+    setList(false);
+  };
+  // Keyboard / assistive-tech activation of the (invisible) row buttons.
+  for (const b of document.querySelectorAll<HTMLButtonElement>('#work-list .row-btn'))
+    b.onclick = (e) => e.detail === 0 && openRow(Number(b.dataset.index));
   thumbs[0].toggleAttribute('aria-current', true);
+  centerThumb(0);
 
   const onRoute = () => {
     const next = routeIndex();
     if (next !== to) {
+      // The scene being left keeps the scroll it was at while it is revealed over.
+      sceneScroll[to] = scrollY;
       // A click mid-reveal starts over from whichever scene covers more screen.
       if (p > 0.5) from = to;
       to = next;
@@ -418,14 +485,14 @@ async function main(): Promise<void> {
         if (inView.has(el)) play(el);
       }
     }
-    scrollTo(0, 0);
-    // Only home scrolls; work is a full-screen slideshow with its minimap.
-    document.documentElement.style.overflow = next === 0 ? '' : 'hidden';
+    lenis.scrollTo(0, { immediate: true, force: true });
+    // Home scrolls; work only in its list view.
+    syncScroll();
     // Only the current route's text is exposed to assistive tech (inert), and
     // each route gets its own title, description, canonical URL and chrome.
     applyMeta(next);
     // Chrome sits on the full-bleed image on work, so it flips to light.
-    for (const id of ['#nav', '#view']) requiredElement(id).classList.toggle('on-dark', next === WORK);
+    for (const id of ['#nav', '#view']) requiredElement(id).classList.toggle('on-dark', next === WORK && !list.on);
   };
   addEventListener('popstate', onRoute);
   for (const a of document.querySelectorAll<HTMLAnchorElement>('#nav a'))
@@ -501,6 +568,8 @@ async function main(): Promise<void> {
       p = Math.min(1, p + dt / REVEAL_SECONDS);
       if (p >= 1) {
         from = to;
+        // Work was left from its list view: reset it now that it is off screen.
+        if (to !== WORK && list.on) setList(false, true);
         p = 0;
       }
     }
@@ -525,6 +594,43 @@ async function main(): Promise<void> {
     const fov = Math.PI / 4;
     const dist = h / 2 / Math.tan(fov / 2);
     const viewProj = multiply(perspective(fov, w / h, 1, dist * 4), lookAt([0, 0, dist], [0, 0, 0]));
+
+    lenis.raf(now);
+    listScroll.y += (listScroll.target - listScroll.y) * (1 - Math.exp(-dt * 8));
+    const base = listBase();
+    // List hover: pointer cursor over a row, and that row's image grows a little.
+    const listLive = to === WORK && from === to && list.on && list.v > 0.99;
+    const hovered = listLive && !drag.active ? rowAt(hoverX, hoverY) : -1;
+    if (hovered !== hoverRow) {
+      hoverRow = hovered;
+      document.body.style.cursor = hovered >= 0 ? 'pointer' : '';
+    }
+    if (thumbBuffer && listThumbs.length) {
+      const k = 1 - Math.exp(-dt * 10);
+      const grown = listThumbs.slice();
+      for (let i = 0; i < rowHover.length; i++) {
+        rowHover[i] += ((i === hoverRow ? 1 : 0) - rowHover[i]) * k;
+        const g = rowHover[i] * 0.06; // up to 6% larger, about its centre
+        const o = i * STRIDE;
+        grown[o] -= (grown[o + 2] * g) / 2;
+        grown[o + 1] -= (grown[o + 3] * g) / 2;
+        grown[o + 2] *= 1 + g;
+        grown[o + 3] *= 1 + g;
+        grown[o + 7] = rowHover[i]; // nudge the grown image above its neighbours
+      }
+      device.queue.writeBuffer(thumbBuffer, 0, grown);
+    }
+    // Work hero image: full screen, eased toward the on-screen copy of the
+    // current slide's list row (screen px), then back into doc px for the draw.
+    if (heroBuffer && listThumbs.length) {
+      const e = list.v;
+      const t = listThumbs.slice(slide.next * STRIDE, slide.next * STRIDE + 4);
+      const ys = COPIES.map((k) => t[1] + k * listPeriod - base);
+      t[1] = ys.reduce((a, b) => (Math.abs(b + t[3] / 2 - innerHeight / 2) < Math.abs(a + t[3] / 2 - innerHeight / 2) ? b : a));
+      const rect = heroRect.map((v, i) => v + (t[i] - v) * e);
+      rect[1] += base;
+      device.queue.writeBuffer(heroBuffer, 0, new Float32Array([...rect, 0, 0, 0, 1]));
+    }
 
     const ease = 1 - Math.exp(-dt * 10);
     mouse.x += (mouse.tx - mouse.x) * ease;
@@ -560,12 +666,15 @@ async function main(): Promise<void> {
         depthStencilAttachment: { view: depth.createView(), depthClearValue: 1, depthLoadOp: 'clear', depthStoreOp: 'discard' },
       });
       pass.setVertexBuffer(0, uvBuf);
+      const sc0 = scene === to ? scrollY : sceneScroll[scene];
       for (const d of draws) {
+        // Work draws scroll with the list; copies sit k periods further down.
+        const sc = scene === WORK ? base - (d.copy ?? 0) * listPeriod : sc0;
         if (d.scene !== scene) continue;
         if ((d.wire && mode === 'solid') || (!d.wire && mode === 'wire')) continue;
-        const u = new Float32Array(28);
+        const u = new Float32Array(32);
         u.set(viewProj);
-        u.set([w, h, scrollY, spin.angle, FAN_CARDS, d.wire, d.ring, spin.vel, mouse.x, mouse.y + scrollY, mouse.hover, d.lift ?? 0], 16);
+        u.set([w, h, sc, spin.angle, FAN_CARDS, d.wire, d.ring, spin.vel, mouse.x, mouse.y + sc, mouse.hover, d.lift ?? 0, d.list ? list.v : 1], 16);
         device.queue.writeBuffer(d.uniform, 0, u);
         pass.setPipeline(d.pipeline);
         pass.setBindGroup(0, d.bindGroup);
@@ -577,7 +686,7 @@ async function main(): Promise<void> {
       pass.end();
     }
 
-    device.queue.writeBuffer(slideUniform, 0, new Float32Array([SLIDE_PHOTOS[slide.cur], SLIDE_PHOTOS[slide.next], slide.k, 0]));
+    device.queue.writeBuffer(slideUniform, 0, new Float32Array([SLIDE_PHOTOS[slide.cur], SLIDE_PHOTOS[slide.next], slide.k, list.v]));
     device.queue.writeBuffer(compositeUniform, 0, new Float32Array([p, w / h, now / 1000, 0]));
     const pass = encoder.beginRenderPass({
       colorAttachments: [{ view: context.getCurrentTexture().createView(), loadOp: 'clear', storeOp: 'store' }],

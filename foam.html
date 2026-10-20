@@ -23,6 +23,9 @@
         --ease: cubic-bezier(0.23, 1, 0.32, 1);
       }
       * { box-sizing: border-box; }
+      /* No native scrollbars: home scrolls with Lenis, the work list with its own loop. */
+      html { scrollbar-width: none; }
+      html::-webkit-scrollbar { display: none; }
       body { margin: 0; background: var(--paper); color: var(--ink); font-family: system-ui, sans-serif; -webkit-font-smoothing: antialiased; }
       :focus-visible { outline: 2px solid currentColor; outline-offset: 3px; }
 
@@ -65,7 +68,16 @@
       #work { position: absolute; inset: 0 0 auto; height: 100vh; }
       #work .image { position: absolute; inset: 0; }
       #work .slide { position: absolute; left: var(--gutter); bottom: 15vh; display: grid; gap: 16px; max-width: 60vw; }
-      #work h2, #work p { color: #fff; }
+      #work .slide h2, #work .slide p { color: #fff; }
+      /* One centred column; repeated endlessly on the GPU (see main.ts listPeriod). */
+      #work-list { position: absolute; top: 0; left: 0; right: 0; width: min(1000px, 100% - 2 * var(--gutter)); margin: 0 auto; padding: 0; list-style: none; display: grid; gap: 56px; }
+      #work-list .row-btn { all: unset; box-sizing: border-box; display: grid; grid-template-columns: minmax(0, 1.25fr) minmax(0, 1fr); gap: 48px; align-items: center; width: 100%; }
+      #work-list .thumb { display: block; aspect-ratio: 3 / 2; background: #cfc6b8; }
+      #work-list .row-text { display: grid; gap: 8px; }
+      #work-list .row-title { display: block; font: 600 clamp(28px, 3vw, 44px)/1.1 system-ui, sans-serif; color: var(--ink); }
+      #work-list .row-meta { display: block; font: 15px/1.5 system-ui, sans-serif; color: var(--muted); }
+      /* Rows are drawn on the GPU and scrolled by main.ts; pointer input is handled there. */
+      body:not(.work-list) #work-list { visibility: hidden; }
       #work h2 { font-size: clamp(48px, 7vw, 104px); }
 
       /* Chrome (real DOM, visible) */
@@ -88,8 +100,13 @@
       #work-ui[hidden] { display: none; }
       #work-ui .meta { display: flex; gap: 16px; padding: 4px 10px; border-radius: 999px; background: rgba(0, 0, 0, 0.45); font: 500 12px system-ui, sans-serif; }
       #counter { font-variant-numeric: tabular-nums; }
-      #minimap { display: flex; gap: 6px; padding: 6px; border-radius: 10px; background: rgba(0, 0, 0, 0.3); backdrop-filter: blur(8px); }
-      #minimap button { width: 76px; height: 48px; padding: 0; border: 0; border-radius: 5px; overflow: hidden; background: none; cursor: pointer; opacity: 0.5; transition: opacity 0.3s, transform 0.5s var(--ease); }
+      #list-toggle { font: 500 12px system-ui, sans-serif; padding: 6px 14px; border: 0; border-radius: 999px; background: rgba(0, 0, 0, 0.45); color: #fff; cursor: pointer; }
+      body.work-list #list-toggle { background: var(--ink); }
+      body.work-list #work-ui .meta, body.work-list #minimap { display: none; }
+      /* A window of five thumbnails, the current one centred. main.ts reorders
+         them (CSS order) so the window wraps around: no empty ends. */
+      #minimap { display: flex; max-width: calc(5 * 48px + 4 * 6px + 12px); overflow-x: hidden; scrollbar-width: none; gap: 6px; padding: 6px; border-radius: 10px; background: rgba(0, 0, 0, 0.3); backdrop-filter: blur(8px); }
+      #minimap button { flex: none; width: 48px; height: 32px; padding: 0; border: 0; border-radius: 5px; overflow: hidden; background: none; cursor: pointer; opacity: 0.5; transition: opacity 0.3s, transform 0.5s var(--ease); }
       #minimap button:hover { opacity: 0.85; transform: translateY(-2px); }
       #minimap img { display: block; width: 100%; height: 100%; object-fit: cover; }
       #minimap button[aria-current] { opacity: 1; box-shadow: 0 0 0 2px #fff; }
@@ -103,7 +120,6 @@
 
       @media (max-width: 720px) {
         .hero, .section-head, .row, .row.two { grid-template-columns: 1fr; }
-        #minimap button { width: 52px; height: 34px; }
         /* Stack the minimap above the view toggle so their targets don't overlap. */
         #work-ui { bottom: 72px; }
       }
@@ -196,6 +212,67 @@
         <img class="sr-only" src="/images/11.webp" alt="Rocks in a misty sea, long exposure" loading="lazy" decoding="async" width="1" height="1" />
         <p data-gl-text data-slide="3">2024 · Film</p>
       </div>
+      <div class="slide">
+        <h2 data-gl-text data-slide="4" data-split="chars">Crossings.</h2>
+        <img class="sr-only" src="/images/00.webp" alt="Overhead view of people crossing a zebra crossing, casting long shadows" loading="lazy" decoding="async" width="1" height="1" />
+        <p data-gl-text data-slide="4">2024 · Street</p>
+      </div>
+      <div class="slide">
+        <h2 data-gl-text data-slide="5" data-split="words">Into the pines.</h2>
+        <img class="sr-only" src="/images/04.webp" alt="A path disappearing into a dark forest" loading="lazy" decoding="async" width="1" height="1" />
+        <p data-gl-text data-slide="5">2023 · Photography</p>
+      </div>
+      <div class="slide">
+        <h2 data-gl-text data-slide="6">Iron lace.</h2>
+        <img class="sr-only" src="/images/07.webp" alt="The Eiffel Tower above a crowd, a bird in flight" loading="lazy" decoding="async" width="1" height="1" />
+        <p data-gl-text data-slide="6">2023 · Travel</p>
+      </div>
+      <div class="slide">
+        <h2 data-gl-text data-slide="7" data-split="words">Spiral study.</h2>
+        <img class="sr-only" src="/images/12.webp" alt="A spiral of wooden slats against the sky" loading="lazy" decoding="async" width="1" height="1" />
+        <p data-gl-text data-slide="7">2022 · Architecture</p>
+      </div>
+      <div class="slide">
+        <h2 data-gl-text data-slide="8" data-split="chars">Light trails.</h2>
+        <img class="sr-only" src="/images/01.webp" alt="Streaks of light running across a dark road at night" loading="lazy" decoding="async" width="1" height="1" />
+        <p data-gl-text data-slide="8">2022 · Night</p>
+      </div>
+      <div class="slide">
+        <h2 data-gl-text data-slide="9" data-split="words">Low tide, fog.</h2>
+        <img class="sr-only" src="/images/03.webp" alt="A lone figure on a dark beach fading into fog" loading="lazy" decoding="async" width="1" height="1" />
+        <p data-gl-text data-slide="9">2021 · Coast</p>
+      </div>
+      <div class="slide">
+        <h2 data-gl-text data-slide="10">Surface tension.</h2>
+        <img class="sr-only" src="/images/05.webp" alt="Close-up of rippling water" loading="lazy" decoding="async" width="1" height="1" />
+        <p data-gl-text data-slide="10">2021 · Water</p>
+      </div>
+      <div class="slide">
+        <h2 data-gl-text data-slide="11" data-split="chars">Long shadows.</h2>
+        <img class="sr-only" src="/images/08.webp" alt="A runner's legs and shadow on sunlit asphalt" loading="lazy" decoding="async" width="1" height="1" />
+        <p data-gl-text data-slide="11">2020 · Sport</p>
+      </div>
+      <div class="slide">
+        <h2 data-gl-text data-slide="12" data-split="words">Weather systems.</h2>
+        <img class="sr-only" src="/images/10.webp" alt="Towering clouds over a dark sky" loading="lazy" decoding="async" width="1" height="1" />
+        <p data-gl-text data-slide="12">2020 · Sky</p>
+      </div>
+      <!-- List view: GL-drawn rows; the buttons stay real for clicks and keyboard. -->
+      <ol id="work-list" aria-label="All work">
+        <li><button class="row-btn" data-index="0"><span class="thumb" data-gl data-photo="2"></span><span class="row-text"><span class="row-title" data-gl-text data-list>Field studies in light.</span><span class="row-meta" data-gl-text data-list>2026 · Photography</span></span></button></li>
+        <li><button class="row-btn" data-index="1"><span class="thumb" data-gl data-photo="6"></span><span class="row-text"><span class="row-title" data-gl-text data-list>Night signals over water.</span><span class="row-meta" data-gl-text data-list>2025 · Installation</span></span></button></li>
+        <li><button class="row-btn" data-index="2"><span class="thumb" data-gl data-photo="9"></span><span class="row-text"><span class="row-title" data-gl-text data-list>Paper and dust.</span><span class="row-meta" data-gl-text data-list>2025 · Print series</span></span></button></li>
+        <li><button class="row-btn" data-index="3"><span class="thumb" data-gl data-photo="11"></span><span class="row-text"><span class="row-title" data-gl-text data-list>The quiet orbit.</span><span class="row-meta" data-gl-text data-list>2024 · Film</span></span></button></li>
+        <li><button class="row-btn" data-index="4"><span class="thumb" data-gl data-photo="0"></span><span class="row-text"><span class="row-title" data-gl-text data-list>Crossings.</span><span class="row-meta" data-gl-text data-list>2024 · Street</span></span></button></li>
+        <li><button class="row-btn" data-index="5"><span class="thumb" data-gl data-photo="4"></span><span class="row-text"><span class="row-title" data-gl-text data-list>Into the pines.</span><span class="row-meta" data-gl-text data-list>2023 · Photography</span></span></button></li>
+        <li><button class="row-btn" data-index="6"><span class="thumb" data-gl data-photo="7"></span><span class="row-text"><span class="row-title" data-gl-text data-list>Iron lace.</span><span class="row-meta" data-gl-text data-list>2023 · Travel</span></span></button></li>
+        <li><button class="row-btn" data-index="7"><span class="thumb" data-gl data-photo="12"></span><span class="row-text"><span class="row-title" data-gl-text data-list>Spiral study.</span><span class="row-meta" data-gl-text data-list>2022 · Architecture</span></span></button></li>
+        <li><button class="row-btn" data-index="8"><span class="thumb" data-gl data-photo="1"></span><span class="row-text"><span class="row-title" data-gl-text data-list>Light trails.</span><span class="row-meta" data-gl-text data-list>2022 · Night</span></span></button></li>
+        <li><button class="row-btn" data-index="9"><span class="thumb" data-gl data-photo="3"></span><span class="row-text"><span class="row-title" data-gl-text data-list>Low tide, fog.</span><span class="row-meta" data-gl-text data-list>2021 · Coast</span></span></button></li>
+        <li><button class="row-btn" data-index="10"><span class="thumb" data-gl data-photo="5"></span><span class="row-text"><span class="row-title" data-gl-text data-list>Surface tension.</span><span class="row-meta" data-gl-text data-list>2021 · Water</span></span></button></li>
+        <li><button class="row-btn" data-index="11"><span class="thumb" data-gl data-photo="8"></span><span class="row-text"><span class="row-title" data-gl-text data-list>Long shadows.</span><span class="row-meta" data-gl-text data-list>2020 · Sport</span></span></button></li>
+        <li><button class="row-btn" data-index="12"><span class="thumb" data-gl data-photo="10"></span><span class="row-text"><span class="row-title" data-gl-text data-list>Weather systems.</span><span class="row-meta" data-gl-text data-list>2020 · Sky</span></span></button></li>
+      </ol>
     </main>
 
     <nav id="nav">
@@ -210,12 +287,22 @@
       <button data-mode="both" aria-pressed="false">Both</button>
     </div>
     <div id="work-ui" hidden>
-      <div class="meta"><span>← → or scroll</span><span id="counter">01 / 04</span></div>
+      <button id="list-toggle" aria-pressed="false">Index</button>
+      <div class="meta"><span>← → or scroll</span><span id="counter">01 / 13</span></div>
       <div id="minimap" role="group" aria-label="Slides">
         <button aria-label="Slide 1" aria-current><img src="/images/thumbs/02.webp" fetchpriority="high" alt="" width="76" height="48" /></button>
         <button aria-label="Slide 2"><img src="/images/thumbs/06.webp" alt="" width="76" height="48" /></button>
         <button aria-label="Slide 3"><img src="/images/thumbs/09.webp" alt="" width="76" height="48" /></button>
         <button aria-label="Slide 4"><img src="/images/thumbs/11.webp" alt="" width="76" height="48" /></button>
+        <button aria-label="Slide 5"><img src="/images/thumbs/00.webp" alt="" width="76" height="48" /></button>
+        <button aria-label="Slide 6"><img src="/images/thumbs/04.webp" alt="" width="76" height="48" /></button>
+        <button aria-label="Slide 7"><img src="/images/thumbs/07.webp" alt="" width="76" height="48" /></button>
+        <button aria-label="Slide 8"><img src="/images/thumbs/12.webp" alt="" width="76" height="48" /></button>
+        <button aria-label="Slide 9"><img src="/images/thumbs/01.webp" alt="" width="76" height="48" /></button>
+        <button aria-label="Slide 10"><img src="/images/thumbs/03.webp" alt="" width="76" height="48" /></button>
+        <button aria-label="Slide 11"><img src="/images/thumbs/05.webp" alt="" width="76" height="48" /></button>
+        <button aria-label="Slide 12"><img src="/images/thumbs/08.webp" alt="" width="76" height="48" /></button>
+        <button aria-label="Slide 13"><img src="/images/thumbs/10.webp" alt="" width="76" height="48" /></button>
       </div>
     </div>
     <div id="message" role="alert"></div>

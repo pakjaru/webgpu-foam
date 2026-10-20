@@ -1,0 +1,41 @@
+# Foam (webgpu-foam)
+
+> This repo is a fork of jeantimex/webgpu-foam. It holds two projects. The first is the origin npm scaffolder `create-vite-webgpu-project` (bin/, template/, the template demo in src/, test/). The second is Foam, a WebGPU learning website (foam.html, src/foam/, the Rust crate dom-compiler/, public/). In Foam, the browser lays out invisible DOM, Rust/wasm reads it into GPU instance buffers, pretext breaks text lines, and WebGPU draws every pane and glyph, with a circle reveal between routes.
+
+Run `npm install`, `npm run wasm` (needs wasm-pack; output is git-ignored) and `npm run dev`. Then open `/`, `/about` and `/work`.
+
+## Docs
+
+- [AGENTS.md](AGENTS.md): canonical agent guide. Covers layout, commands, architecture, contracts, conventions, gotchas and the definition of done.
+- [llms-full.txt](llms-full.txt): everything in one file, with exact buffer layouts, uniform field orders, route behaviours and a file-by-file reference.
+- [README.md](README.md): the scaffolder's user docs (CLI options, generated code).
+
+## Foam source
+
+- [foam.html](foam.html): the page. Three `<main data-route>` scenes, CSS, chrome and the `data-gl*` hooks the renderer reads.
+- [src/foam/boot.ts](src/foam/boot.ts): entry. Sets route meta, then imports the renderer after load + first paint.
+- [src/foam/main.ts](src/foam/main.ts): stateful renderer. Holds GPU setup, scene compile, draws, router, split-text, work slideshow/list, about fan, input and the frame loop.
+- [src/foam/renderer/scene.wgsl](src/foam/renderer/scene.wgsl): scene-pass vertex/fragment shaders and `struct U`.
+- [src/foam/renderer/composite.wgsl](src/foam/renderer/composite.wgsl): route-to-route circle reveal.
+- [src/foam/renderer/pipelines.ts](src/foam/renderer/pipelines.ts): bind group layouts, the six scene pipelines and the composite pipeline. `SAMPLES = 4`.
+- [src/foam/text/text_layout.ts](src/foam/text/text_layout.ts): glyph quads, glyph atlas and split-text data. `TEXT_STRIDE = 13`.
+- [src/foam/router/routes.ts](src/foam/router/routes.ts): `routeIndex()` and per-route meta, `inert` and chrome.
+- [src/foam/scene/grid_mesh.ts](src/foam/scene/grid_mesh.ts): the one shared 16x16 grid quad.
+- [src/foam/scene/photos.ts](src/foam/scene/photos.ts): 13 photos packed into one texture array, plus their aspects.
+- [src/foam/scene/fan.ts](src/foam/scene/fan.ts): about fan instances. `FAN_CARDS = 13`.
+- [src/foam/lib/dom_compiler.ts](src/foam/lib/dom_compiler.ts): wasm adapter. `compileRects()`, `STRIDE = 8`.
+- [src/foam/lib/gsap.ts](src/foam/lib/gsap.ts), [src/foam/lib/lenis.ts](src/foam/lib/lenis.ts), [src/foam/lib/pretext.ts](src/foam/lib/pretext.ts): the only files that import third-party packages.
+- [dom-compiler/src/lib.rs](dom-compiler/src/lib.rs): Rust `compile()`, which turns the DOM into 8-float instances.
+- [vite.config.ts](vite.config.ts): rewrites `/`, `/about` and `/work` to foam.html in dev and preview.
+
+## Scaffolder
+
+- [bin/create-vite-webgpu-project.js](bin/create-vite-webgpu-project.js): CLI. Copies src/ (minus src/foam) and overlays template/.
+- [test/create-project.test.js](test/create-project.test.js): `npm test`.
+- [package.json](package.json): scripts, Foam runtime dependencies, published `files`.
+
+## Optional
+
+- [src/webgpu/utils.ts](src/webgpu/utils.ts), [src/math/mat4.ts](src/math/mat4.ts), [src/utils/dom.ts](src/utils/dom.ts): template helpers that Foam reuses.
+- [dom-compiler/Cargo.toml](dom-compiler/Cargo.toml): crate manifest (wasm-bindgen, web-sys).
+- [public/sitemap.xml](public/sitemap.xml), [public/robots.txt](public/robots.txt): static SEO files. Keep them in sync with `VITE_SITE_ORIGIN` in `.env`.

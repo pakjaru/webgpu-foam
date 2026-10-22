@@ -111,8 +111,18 @@ export function layoutText(elements: Element[], rects: Float32Array, atlas: HTML
     const fm = measure(ctx, `${font}|M`, 'M');
     // CSS centres the font's ascent+descent box inside the line box.
     const baseline = (lineHeight - (fm.fontAscent + fm.fontDescent)) / 2 + fm.fontAscent;
-    breakLines(prepared, base[2], lineHeight).forEach((line, j) => {
+    // Single-line (nowrap) text never wraps, and its canvas advances are scaled
+    // to the DOM width: canvas advances skip kerning, so unscaled they overrun
+    // the box (a fitted headline would spill a letter or misplace what follows).
+    const nowrap = style.whiteSpace === 'nowrap' || style.whiteSpace === 'pre';
+    breakLines(prepared, nowrap ? Infinity : base[2], lineHeight).forEach((line, j) => {
       let x = base[0];
+      let fit = 1;
+      if (nowrap) {
+        let sum = 0;
+        for (const { segment: g } of segmenter.segment(line)) sum += measure(ctx, `${font}|${g}`, g).advance;
+        if (sum > 0) fit = base[2] / sum;
+      }
       const y = base[1] + j * lineHeight + baseline;
       // Mask edge: the line box, or lower if a descender (g, y, p) hangs past it.
       let lineBottom = base[1] + (j + 1) * lineHeight;
@@ -130,7 +140,7 @@ export function layoutText(elements: Element[], rects: Float32Array, atlas: HTML
           word++;
           inWord = false;
         }
-        x += m.advance;
+        x += m.advance * fit;
       }
       if (inWord) word++;
       inWord = false;

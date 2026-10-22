@@ -4,3 +4,5 @@ dist
 .env
 dom-compiler/target
 src/foam/lib/wasm/
+# Licensed fonts (Neue Montreal, Right Grotesk): keep them local, not in the repo.
+public/fonts/

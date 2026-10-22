@@ -15,18 +15,37 @@
     <link rel="canonical" href="%VITE_SITE_ORIGIN%/" />
     <meta name="twitter:card" content="summary_large_image" />
     <style>
+      @font-face { font-family: 'Neue Montreal'; src: url('/fonts/NeueMontreal-Regular.woff2') format('woff2'); font-weight: 400; font-style: normal; font-display: swap; }
+      @font-face { font-family: 'Neue Montreal'; src: url('/fonts/NeueMontreal-Medium.woff2') format('woff2'); font-weight: 500 700; font-style: normal; font-display: swap; }
+      @font-face { font-family: 'Neue Montreal'; src: url('/fonts/NeueMontreal-LightItalic.woff2') format('woff2'); font-weight: 300; font-style: italic; font-display: swap; }
+      @font-face { font-family: 'Right Grotesk'; src: url('/fonts/RightGrotesk-TightMedium.woff2') format('woff2'); font-weight: 500; font-display: swap; }
       :root {
         --ink: #16140f;
+        /* Sentinel: GL text in this exact colour takes white or ink, whichever
+           reads over the home mesh gradient (autoColor in scene.wgsl). */
+        --auto: rgb(1, 2, 3);
+        --sans: 'Neue Montreal', system-ui, sans-serif;
         --muted: #6b655b; /* 5.3:1 on --paper */
         --paper: #f6f4ef;
-        --gutter: max(24px, 7vw);
+        --gutter: max(24px, 4.5vw);
+        /* Layout grid: 12 columns (desktop), 8 (tablet), 4 (mobile). --col is one
+           column's width, --q one quarter of the grid (--span columns + gaps). */
+        --cols: 12;
+        --span: 3;
+        --gap: 20px;
+        --col: calc((100vw - 2 * var(--gutter) - (var(--cols) - 1) * var(--gap)) / var(--cols));
+        --q: calc(var(--span) * (var(--col) + var(--gap)));
         --ease: cubic-bezier(0.23, 1, 0.32, 1);
       }
+      @media (max-width: 1024px) { :root { --cols: 8; --span: 2; --gap: 16px; } }
+      @media (max-width: 600px) { :root { --cols: 4; --span: 1; --gap: 12px; } }
       * { box-sizing: border-box; }
+      /* A row on the layout grid; children take column spans. */
+      .grid-row { display: grid; grid-template-columns: repeat(var(--cols), minmax(0, 1fr)); column-gap: var(--gap); }
       /* No native scrollbars: home scrolls with Lenis, the work list with its own loop. */
       html { scrollbar-width: none; }
       html::-webkit-scrollbar { display: none; }
-      body { margin: 0; background: var(--paper); color: var(--ink); font-family: system-ui, sans-serif; -webkit-font-smoothing: antialiased; }
+      body { margin: 0; background: var(--paper); color: var(--ink); font-family: var(--sans); -webkit-font-smoothing: antialiased; }
       :focus-visible { outline: 2px solid currentColor; outline-offset: 3px; }
 
       /* Rendered by WebGPU; the DOM only supplies layout and colour. */
@@ -37,13 +56,45 @@
 
       /* GL text styles: font, size, line-height and colour are read per element. */
       h1, h2, p { margin: 0; overflow-wrap: break-word; color: var(--ink); }
-      h1 { font: 600 clamp(44px, 6vw, 84px)/1.02 system-ui, sans-serif; }
-      h2 { font: 600 28px/1.15 system-ui, sans-serif; }
-      p { font: 17px/1.5 system-ui, sans-serif; max-width: 34em; color: #3d3931; }
-      .eyebrow { display: block; font: 600 12px/1.6 system-ui, sans-serif; color: var(--muted); }
+      h1 { font: 600 clamp(44px, 6vw, 84px)/1.02 var(--sans); }
+      .as-h1 { font: 600 clamp(44px, 6vw, 84px)/1.02 var(--sans) !important; }
+      h2 { font: 600 28px/1.15 var(--sans); }
+      p { font: 17px/1.5 var(--sans); max-width: 34em; color: #3d3931; }
+      .eyebrow { display: block; font: 600 12px/1.6 var(--sans); color: var(--muted); }
 
       /* Home */
       #home { padding: 160px var(--gutter) 30vh; display: grid; gap: 120px; }
+      /* Mesh hero: full-bleed first screen over the GPU mesh gradient
+         ([data-gl-bg]), a four-column grid of hairlines with crosses, and
+         adaptive (--auto) type. */
+      /* --inset: how far text sits from the hairline it hangs off. */
+      /* --header-line: the top hairline, just under the header's three link rows. */
+      .mesh-hero { --inset: 10px; --header-line: 74px; position: relative; height: 100vh; min-height: 560px; margin: -160px calc(-1 * var(--gutter)) 0; }
+      .mesh-hero > * { position: absolute; }
+      .mh-bg { inset: 0; background: #888; }
+      .mh-line { background: #8d8d8d; }
+      .mh-line.v { top: 0; bottom: 0; width: 1px; }
+      .k0 { left: var(--gutter); }
+      .k1 { left: calc(var(--gutter) + (100% - 2 * var(--gutter)) * 0.25); }
+      .k2 { left: calc(var(--gutter) + (100% - 2 * var(--gutter)) * 0.5); }
+      .k3 { left: calc(var(--gutter) + (100% - 2 * var(--gutter)) * 0.75); }
+      .k4 { left: calc(100% - var(--gutter)); }
+      .mh-line.h { left: 0; right: 0; height: 1px; }
+      .mh-cross { width: 13px; height: 1px; background: #8d8d8d; transform: translate(-6px, 0); }
+      .mh-cross.v { width: 1px; height: 13px; transform: translate(0, -6px); }
+      .mh-meta, .mh-foot { font: 500 12px/1.25 var(--sans); color: var(--auto); }
+      /* Font size is set by fitTitle() so the word spans the grid's full width. */
+      .mh-title { top: calc(var(--header-line) + 14px); left: var(--gutter); margin: 0; font: 500 120px/0.86 var(--sans); white-space: nowrap; }
+      .mh-title span { display: inline-block; color: var(--auto); }
+      .mh-title .mh-dot { color: #e2231a; }
+      .mh-sub { top: calc(52% + 18px); left: calc(var(--gutter) + 18px); display: grid; margin: 0; } /* large type needs more air off the line than --inset */
+      .mh-sub span:not(.mh-meta) { font: 400 clamp(28px, 3.2vw, 46px)/1.06 var(--sans); color: var(--auto); }
+      .mh-sub .it { font-style: italic; font-weight: 300; }
+      .mh-meta.l { display: block; margin-top: 22px; } /* under the subtitle, in its flow */
+      .mh-meta.r { top: calc(52% + 18px); left: calc(var(--gutter) + (100% - 2 * var(--gutter)) * 0.75 + var(--inset)); width: calc((100% - 2 * var(--gutter)) * 0.25 - 2 * var(--inset)); font-size: 13px; line-height: 1.35; }
+      @media (max-width: 600px) { .mh-meta.r { top: calc(52% + 150px); left: calc(var(--gutter) + var(--inset)); width: calc(100% - 2 * var(--gutter) - 2 * var(--inset)); } }
+      .mh-foot { bottom: 18px; white-space: nowrap; }
+      @media (max-width: 600px) { .mh-foot { font-size: 9px; } }
       .hero { display: grid; grid-template-columns: 1.15fr 1fr; gap: 6vw; align-items: end; }
       .copy { display: grid; gap: 24px; align-content: start; }
       .grid { aspect-ratio: 4 / 3; background: #e4dfd5; padding: 20px; display: grid; grid-template-columns: repeat(4, 1fr); gap: 10px; align-content: start; }
@@ -51,7 +102,9 @@
       .grid > div:nth-child(3n) { background: #b9ad9b; }
       .grid > div:nth-child(5n) { background: #8f8372; }
       .section { display: grid; gap: 32px; }
-      .section-head { display: grid; grid-template-columns: 1fr 2fr; gap: 6vw; align-items: start; }
+      .section-head { display: grid; grid-template-columns: repeat(var(--cols), minmax(0, 1fr)); column-gap: var(--gap); row-gap: 16px; align-items: start; }
+      .section-head > :first-child { grid-column: span var(--span); }
+      .section-head > :last-child { grid-column: span calc(var(--cols) - var(--span)); }
       .row { display: grid; grid-template-columns: repeat(3, 1fr); gap: 20px; }
       .row > div { aspect-ratio: 3 / 4; background: #c4bcae; }
       .row > div:nth-child(2) { background: #8a8174; }
@@ -61,6 +114,10 @@
       .wide { height: 420px; background: #d6cebf; }
 
       /* About */
+      /* About and work are one screen tall and clipped, so their layout (e.g. the
+         tall work list) never extends the document that home scrolls. overflow: clip
+         keeps every element laid out and measurable, unlike display: none. */
+      #about, #work { height: 100vh; overflow: clip; }
       #about { position: absolute; inset: 0 0 auto; padding: 140px var(--gutter); display: grid; gap: 20px; justify-items: start; }
       #about h2 { font-size: clamp(36px, 4vw, 56px); }
 
@@ -74,23 +131,27 @@
       #work-list .row-btn { all: unset; box-sizing: border-box; display: grid; grid-template-columns: minmax(0, 1.25fr) minmax(0, 1fr); gap: 48px; align-items: center; width: 100%; }
       #work-list .thumb { display: block; aspect-ratio: 3 / 2; background: #cfc6b8; }
       #work-list .row-text { display: grid; gap: 8px; }
-      #work-list .row-title { display: block; font: 600 clamp(28px, 3vw, 44px)/1.1 system-ui, sans-serif; color: var(--ink); }
-      #work-list .row-meta { display: block; font: 15px/1.5 system-ui, sans-serif; color: var(--muted); }
+      #work-list .row-title { display: block; font: 600 clamp(28px, 3vw, 44px)/1.1 var(--sans); color: var(--ink); }
+      #work-list .row-meta { display: block; font: 15px/1.5 var(--sans); color: var(--muted); }
       /* Rows are drawn on the GPU and scrolled by main.ts; pointer input is handled there. */
       body:not(.work-list) #work-list { visibility: hidden; }
       #work h2 { font-size: clamp(48px, 7vw, 104px); }
 
       /* Chrome (real DOM, visible) */
-      #nav { position: fixed; inset: 0 0 auto; z-index: 2; display: flex; align-items: center; gap: 28px; padding: 24px var(--gutter); color: var(--ink); transition: color 0.4s var(--ease); }
-      #nav.on-dark { color: #fff; text-shadow: 0 1px 4px rgba(0, 0, 0, 0.7); } /* light photos (e.g. 02) sit under it */
-      #nav .brand { margin-right: auto; font-weight: 700; letter-spacing: -0.02em; color: inherit; text-decoration: none; }
-      #nav a:not(.brand) { position: relative; font-size: 14px; color: inherit; text-decoration: none; opacity: 0.72; transition: opacity 0.3s; } /* ≥ 4.5:1 on paper */
-      #nav a:not(.brand):hover, #nav a[aria-current] { opacity: 1; }
-      #nav a:not(.brand)::after { content: ''; position: absolute; left: 0; right: 0; bottom: -4px; height: 1px; background: currentColor; transform: scaleX(0); transform-origin: right; transition: transform 0.5s var(--ease); }
-      #nav a[aria-current]::after { transform: scaleX(1); transform-origin: left; }
+      /* difference blending keeps the nav readable over the gradient, photos and paper. */
+      /* Header: the reference's link columns, one per grid quarter. A dot marks
+         the link of the current page. difference blending keeps it readable
+         over the gradient, photos and paper on every route. */
+      #nav { position: fixed; inset: 0 0 auto; z-index: 2; grid-template-columns: repeat(4, minmax(0, 1fr)); column-gap: 0; padding: 18px var(--gutter) 0; color: #fff; mix-blend-mode: difference; font: 500 12px/1.3 var(--sans); }
+      .nav-col { display: grid; justify-items: start; padding-left: 10px; } /* 10px = the hero's --inset */
+      #nav a { position: relative; display: flex; align-items: center; gap: 6px; color: inherit; text-decoration: none; opacity: 0.72; transition: opacity 0.3s; }
+      #nav a:hover, #nav a[aria-current] { opacity: 1; }
+      #nav a[aria-current]::before { content: ''; width: 4px; height: 4px; background: currentColor; }
+      #nav-clock { font-variant-numeric: tabular-nums; }
+      @media (max-width: 600px) { #nav .nav-mail { display: none; } }
 
-      #view { position: fixed; left: var(--gutter); bottom: 24px; z-index: 2; display: flex; padding: 3px; gap: 2px; border-radius: 999px; background: rgba(22, 20, 15, 0.08); backdrop-filter: blur(8px); }
-      #view button { font: 500 12px system-ui, sans-serif; padding: 6px 12px; border: 0; border-radius: 999px; background: none; color: var(--ink); cursor: pointer; }
+      #view { position: fixed; left: var(--gutter); bottom: 64px; /* above the hero footer row */ z-index: 2; display: flex; padding: 3px; gap: 2px; border-radius: 999px; background: rgba(22, 20, 15, 0.08); backdrop-filter: blur(8px); }
+      #view button { font: 500 12px var(--sans); padding: 6px 12px; border: 0; border-radius: 999px; background: none; color: var(--ink); cursor: pointer; }
       #view button[aria-pressed='true'] { background: var(--ink); color: var(--paper); }
       #view.on-dark { background: rgba(0, 0, 0, 0.45); } /* dark backing keeps white labels readable on any photo */
       #view.on-dark button { color: #fff; }
@@ -98,9 +159,12 @@
 
       #work-ui { position: fixed; right: var(--gutter); bottom: 24px; z-index: 2; display: grid; justify-items: end; gap: 10px; color: #fff; }
       #work-ui[hidden] { display: none; }
-      #work-ui .meta { display: flex; gap: 16px; padding: 4px 10px; border-radius: 999px; background: rgba(0, 0, 0, 0.45); font: 500 12px system-ui, sans-serif; }
+      /* Shown once the reveal into work finishes (main.ts); it eases in rather than popping. */
+      #work-ui:not([hidden]) { animation: work-ui-in 0.6s var(--ease) both; }
+      @keyframes work-ui-in { from { opacity: 0; transform: translateY(8px); } }
+      #work-ui .meta { display: flex; gap: 16px; padding: 4px 10px; border-radius: 999px; background: rgba(0, 0, 0, 0.45); font: 500 12px var(--sans); }
       #counter { font-variant-numeric: tabular-nums; }
-      #list-toggle { font: 500 12px system-ui, sans-serif; padding: 6px 14px; border: 0; border-radius: 999px; background: rgba(0, 0, 0, 0.45); color: #fff; cursor: pointer; }
+      #list-toggle { font: 500 12px var(--sans); padding: 6px 14px; border: 0; border-radius: 999px; background: rgba(0, 0, 0, 0.45); color: #fff; cursor: pointer; }
       body.work-list #list-toggle { background: var(--ink); }
       body.work-list #work-ui .meta, body.work-list #minimap { display: none; }
       /* A window of five thumbnails, the current one centred. main.ts reorders
@@ -115,6 +179,16 @@
          Off-screen rather than clipped: lazy images out here are never fetched, the GPU loads its own copies. */
       .sr-only { position: absolute; left: -10000px; top: 0; width: 1px; height: 1px; overflow: hidden; }
 
+      /* Intro loader (src/foam/loader/loader.ts): stacked panels, ink on top,
+         lifted away in a stagger once the fake counter reaches 100. */
+      #loader { position: fixed; inset: 0; z-index: 10; overflow: hidden; }
+      .loader-panel { position: absolute; inset: 0; }
+      .loader-panel.paper { background: var(--paper); }
+      .loader-panel.red { background: #c8372d; }
+      .loader-panel.ink { background: var(--ink); color: var(--paper); display: flex; align-items: flex-end; justify-content: space-between; padding: 24px var(--gutter); }
+      .loader-brand { font: 700 14px var(--sans); letter-spacing: -0.02em; align-self: flex-start; }
+      .loader-count-mask { overflow: hidden; }
+      .loader-count-line { display: block; font: 500 clamp(72px, 16vw, 220px)/0.9 'Right Grotesk', var(--sans); font-variant-numeric: tabular-nums; letter-spacing: -0.04em; }
       #message { position: fixed; inset: 0; display: none; place-items: center; padding: 2rem; }
       #message.visible { display: grid; }
 
@@ -127,12 +201,43 @@
   </head>
   <body>
     <canvas id="webgpu-canvas" aria-hidden="true"></canvas>
+    <div id="loader" aria-hidden="true">
+      <div class="loader-panel paper"></div>
+      <div class="loader-panel red"></div>
+      <div class="loader-panel ink">
+        <span class="loader-brand">Foam</span>
+        <span class="loader-count-mask"><span class="loader-count-line"><span id="loader-count">0</span>%</span></span>
+      </div>
+    </div>
 
     <main id="home" data-route="/">
+      <section class="mesh-hero" aria-labelledby="mh-title">
+        <div class="mh-bg" data-gl-bg></div>
+        <i data-photo="-1" class="mh-line h" data-gl style="top: var(--header-line)"></i>
+        <i data-photo="-1" class="mh-line h" data-gl style="top: 52%"></i>
+        <i data-photo="-1" class="mh-line h" data-gl style="bottom: 46px"></i>
+        <i data-photo="-1" class="mh-line v k0" data-gl></i>
+        <i data-photo="-1" class="mh-line v k1" data-gl></i>
+        <i data-photo="-1" class="mh-line v k2" data-gl></i>
+        <i data-photo="-1" class="mh-line v k3" data-gl></i>
+        <i data-photo="-1" class="mh-line v k4" data-gl></i>
+        <i data-photo="-1" class="mh-cross k0" data-gl style="top: 52%"></i><i data-photo="-1" class="mh-cross v k0" data-gl style="top: 52%"></i>
+        <i data-photo="-1" class="mh-cross k1" data-gl style="top: 52%"></i><i data-photo="-1" class="mh-cross v k1" data-gl style="top: 52%"></i>
+        <i data-photo="-1" class="mh-cross k2" data-gl style="top: 52%"></i><i data-photo="-1" class="mh-cross v k2" data-gl style="top: 52%"></i>
+        <i data-photo="-1" class="mh-cross k3" data-gl style="top: 52%"></i><i data-photo="-1" class="mh-cross v k3" data-gl style="top: 52%"></i>
+        <i data-photo="-1" class="mh-cross k4" data-gl style="top: 52%"></i><i data-photo="-1" class="mh-cross v k4" data-gl style="top: 52%"></i>
+        <h1 class="mh-title" id="mh-title"><span data-gl-text data-split="chars">MadeIndonesia</span><span class="mh-dot" data-gl-text>.</span></h1>
+        <p class="mh-sub"><span data-gl-text>European precision,</span><span class="it" data-gl-text>Indonesian craft.</span><span class="mh-meta l" data-gl-text>(01)&emsp;Yogyakarta, ID — 7.7956° S, 110.3695° E</span></p>
+        <span class="mh-meta r" data-gl-text data-split="words">Excellent knowledge and quality for a cost-effective rate. A full team in Yogyakarta, run by European project managers.</span>
+        <span class="mh-foot" data-gl-text style="left: var(--gutter)">EST. 2026</span>
+        <span class="mh-foot" data-gl-text style="left: 50%; transform: translateX(-50%)">DESIGN — ENGINEERING — PRODUCTION</span>
+        <span class="mh-foot" data-gl-text style="right: var(--gutter)">©2026</span>
+      </section>
+
       <section class="hero">
         <div class="copy" data-gl-frame>
           <span class="eyebrow" data-gl-text>WEBGPU · RUST · PRETEXT</span>
-          <h1 data-gl-text>A live demonstration of a native WebGPU renderer.</h1>
+          <h2 class="as-h1" data-gl-text>A live demonstration of a native WebGPU renderer.</h2>
           <p data-gl-text data-split="words">The browser lays out the page. Rust reads it into instance buffers, pretext breaks the lines, and every pane and glyph is drawn on the GPU.</p>
         </div>
         <div class="grid" data-gl>
@@ -275,11 +380,11 @@
       </ol>
     </main>
 
-    <nav id="nav">
-      <a class="brand" href="/">Foam</a>
-      <a href="/">Home</a>
-      <a href="/about">About</a>
-      <a href="/work">Work</a>
+    <nav id="nav" class="grid-row" aria-label="Main">
+      <div class="nav-col"><a href="/" data-page>Studio</a><a href="/about" data-page>About</a><a href="/about#process">Process</a></div>
+      <div class="nav-col"><a href="/work" data-page>Work</a><a href="/work#projects">Projects</a><a href="/work#clients">Clients</a></div>
+      <div class="nav-col"><a href="mailto:hello@madeindonesia.co">Contact</a><a class="nav-mail" href="mailto:hello@madeindonesia.co">hello@madeindonesia.co</a><a href="mailto:hello@madeindonesia.co?subject=Book%20a%20call">Book a call</a></div>
+      <div class="nav-col nav-place"><span>Yogyakarta, ID</span><span id="nav-clock">--:-- WIB</span></div>
     </nav>
     <div id="view" role="group" aria-label="Render view">
       <button data-mode="solid" aria-pressed="true">Solid</button>

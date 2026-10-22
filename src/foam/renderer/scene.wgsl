@@ -14,7 +14,7 @@ struct U {
   hover: f32,     // cursor presence 0..1 (fades out when it leaves the page)
   lift: f32,      // 1 = this draw reacts to the cursor (photos), 0 = it doesn't
   fade: f32,      // draw opacity 0..1 (work list rows fade with the list view)
-  _p0: f32,
+  time: f32,      // seconds, animates the home mesh gradient
   _p1: f32,
   _p2: f32,
 }
@@ -36,6 +36,60 @@ struct Out {
   @location(4) clipY: f32, // fragments below this doc y are discarded
   @location(5) @interpolate(flat) img: f32, // photo layer, -1 = flat colour (work: element aspect)
   @location(6) bulge: f32, // cursor influence at this vertex, 0..1
+  @location(7) docX: f32,  // document-space x, for the home mesh gradient
+}
+
+fn sq(v: vec2f) -> f32 { return dot(v, v); }
+
+// Value noise and fBm for the liquid gradient.
+fn hash2(p: vec2f) -> f32 {
+  return fract(sin(dot(p, vec2f(127.1, 311.7))) * 43758.5453);
+}
+fn noise2(p: vec2f) -> f32 {
+  let i = floor(p);
+  let f = fract(p);
+  let w = f * f * (3.0 - 2.0 * f);
+  return mix(mix(hash2(i), hash2(i + vec2f(1.0, 0.0)), w.x), mix(hash2(i + vec2f(0.0, 1.0)), hash2(i + vec2f(1.0, 1.0)), w.x), w.y);
+}
+fn fbm(p0: vec2f) -> f32 {
+  var p = p0;
+  var a = 0.5;
+  var v = 0.0;
+  for (var k = 0; k < 4; k++) {
+    v += a * noise2(p);
+    p = mat2x2f(1.6, 1.2, -1.2, 1.6) * p; // rotate + scale each octave so no grid shows
+    a *= 0.5;
+  }
+  return v;
+}
+
+/**
+ * Home mesh gradient, 0 (near black) .. 1 (near white), as a function of
+ * document px so the background and the text over it agree. Liquid motion by
+ * domain warping (Inigo Quilez, "warping", iquilezles.org/articles/warp):
+ * f(p + 4 r), r = fbm(p + 4 q), q = fbm(p): fBm sampled through two layers of
+ * animated fBm flows like ink folding through water across the whole hero. A
+ * dark-left / light-right bias keeps the reference composition, and a faint
+ * light pool follows the cursor.
+ */
+fn meshGray(doc: vec2f) -> f32 {
+  let p = doc / u.viewport.y * 1.8;
+  let t = u.time * 0.35;
+  let q = vec2f(fbm(p + vec2f(0.0, 0.0) + t * 0.30), fbm(p + vec2f(5.2, 1.3) - t * 0.25));
+  let r = vec2f(fbm(p + 4.0 * q + vec2f(1.7, 9.2) + t * 0.50), fbm(p + 4.0 * q + vec2f(8.3, 2.8) - t * 0.42));
+  let f = fbm(p + 4.0 * r);
+  let s = doc / u.viewport;
+  let bias = s.x * 0.85 + s.y * 0.25 - 0.55; // dark left, light right
+  var g = smoothstep(0.25, 0.75, f + bias * 0.9);
+  g += 0.18 * u.hover * exp(-sq((doc - u.mouse) / u.viewport.y) * 18.0);
+  return clamp(g, 0.0, 1.0);
+}
+
+/** Text whose DOM colour is the sentinel rgb(1, 2, 3) (`--auto` in foam.html) takes white or ink, whichever reads over the gradient. */
+fn autoColor(color: vec3f, doc: vec2f) -> vec3f {
+  let isAuto = all(abs(color * 255.0 - vec3f(1.0, 2.0, 3.0)) < vec3f(0.5));
+  let ink = mix(vec3f(0.97), vec3f(0.086, 0.078, 0.059), smoothstep(0.42, 0.62, meshGray(doc)));
+  return select(color, ink, isAuto);
 }
 
 const BULGE_RADIUS = 220.0; // px
@@ -54,7 +108,7 @@ const FIN_W = 180.0;
 const FIN_H = 240.0;
 const FIN_GAP = 90.0;
 
-fn place(uv: vec2f, rect: vec4f, color: vec4f, index: f32) -> Out {
+fn place(uv: vec2f, rect: vec4f, color: vec4f, index: f32, bulgeable: f32) -> Out {
   // Page layout: document px -> world px, origin at viewport centre, y up.
   // Nested layers (color.w = depth) sit slightly in front of their parents.
   let px = rect.xy + uv * rect.zw - vec2f(0.0, u.scroll);
@@ -63,7 +117,7 @@ fn place(uv: vec2f, rect: vec4f, color: vec4f, index: f32) -> Out {
   // Cursor bulge: the subdivided pane swells toward the camera under the
   // cursor, like a soft membrane being pressed from behind.
   let d = distance(rect.xy + uv * rect.zw, u.mouse);
-  let bulge = exp(-(d * d) / (BULGE_RADIUS * BULGE_RADIUS)) * u.hover * u.lift * (1.0 - u.ring);
+  let bulge = exp(-(d * d) / (BULGE_RADIUS * BULGE_RADIUS)) * u.hover * u.lift * (1.0 - u.ring) * bulgeable;
   page.z += bulge * BULGE_LIFT;
 
   // Fan: each card is a tilted fin radiating from the Y axis, keeping its aspect.
@@ -90,6 +144,7 @@ fn place(uv: vec2f, rect: vec4f, color: vec4f, index: f32) -> Out {
   o.color = color.rgb;
   o.uv = uv;
   o.docY = rect.y + uv.y * rect.w;
+  o.docX = rect.x + uv.x * rect.z;
   o.clipY = 1e9;
   o.img = -1.0;
   o.bulge = bulge;
@@ -109,7 +164,8 @@ fn vs(
   @location(6) img: f32,
   @builtin(instance_index) ii: u32,
 ) -> Out {
-  var o = place(uv, rect, color, f32(ii));
+  // Only photo panes swell under the cursor; flat boxes (e.g. the hero grid) stay put.
+  var o = place(uv, rect, color, f32(ii), select(0.0, 1.0, img >= 0.0));
   o.img = img;
   if (img >= 0.0) { o.atlasUv = lens(cover(uv, rect.z / rect.w, aspects[u32(img)]), o.bulge); }
   return o;
@@ -131,7 +187,7 @@ fn vs_text(
   // Text sits a few layers above whatever it is laid over (e.g. the work image).
   var c = color;
   c.w += 3.0;
-  var o = place(uv, r, c, f32(ii));
+  var o = place(uv, r, c, f32(ii), 0.0);
   o.atlasUv = mix(atlasRect.xy, atlasRect.zw, uv);
   o.clipY = lineBottom;
   return o;
@@ -150,7 +206,7 @@ fn fs_text(i: Out) -> @location(0) vec4f {
   // Sample before discarding: textureSample needs uniform control flow.
   let a = textureSample(atlas, atlasSampler, i.atlasUv).a;
   if (i.docY > i.clipY - 0.5) { discard; }
-  return vec4f(i.color, a * u.fade);
+  return vec4f(autoColor(i.color, vec2f(i.docX, i.docY)), a * u.fade);
 }
 
 @fragment
@@ -166,7 +222,7 @@ fn vs_image(
   @location(2) color: vec4f,
   @builtin(instance_index) ii: u32,
 ) -> Out {
-  var o = place(uv, rect, color, f32(ii));
+  var o = place(uv, rect, color, f32(ii), 0.0);
   o.img = rect.z / rect.w; // element aspect; each layer is cover-cropped in fs_image
   return o;
 }
@@ -186,4 +242,10 @@ fn fs_image(i: Out) -> @location(0) vec4f {
   // In list view the image is a row thumbnail: no scrim.
   let scrim = mix(1.0, mix(0.45, 1.0, slide.w), smoothstep(0.35, 1.0, i.uv.y));
   return vec4f(select(cur, next, i.uv.y > 1.0 - e) * scrim, 1.0);
+}
+
+@fragment
+fn fs_mesh(i: Out) -> @location(0) vec4f {
+  let g = meshGray(vec2f(i.docX, i.docY));
+  return vec4f(mix(vec3f(0.04), vec3f(0.97), g), 1.0);
 }

@@ -15,10 +15,11 @@ Run `npm install`, `npm run wasm` (needs wasm-pack; output is git-ignored) and `
 - [foam.html](foam.html): the page. Three `<main data-route>` scenes, CSS, chrome and the `data-gl*` hooks the renderer reads.
 - [src/foam/boot.ts](src/foam/boot.ts): entry. Sets route meta, then imports the renderer after load + first paint.
 - [src/foam/main.ts](src/foam/main.ts): stateful renderer. Holds GPU setup, scene compile, draws, router, split-text, work slideshow/list, about fan, input and the frame loop.
-- [src/foam/renderer/scene.wgsl](src/foam/renderer/scene.wgsl): scene-pass vertex/fragment shaders and `struct U`.
+- [src/foam/renderer/scene.wgsl](src/foam/renderer/scene.wgsl): scene-pass vertex/fragment shaders and `struct U`, including the home mesh gradient (`meshGray`, `fs_mesh`) and adaptive text colour (`autoColor`).
 - [src/foam/renderer/composite.wgsl](src/foam/renderer/composite.wgsl): route-to-route circle reveal.
 - [src/foam/renderer/pipelines.ts](src/foam/renderer/pipelines.ts): bind group layouts, the six scene pipelines and the composite pipeline. `SAMPLES = 4`.
 - [src/foam/text/text_layout.ts](src/foam/text/text_layout.ts): glyph quads, glyph atlas and split-text data. `TEXT_STRIDE = 13`.
+- [src/foam/loader/loader.ts](src/foam/loader/loader.ts): intro loader with a fake % counter; panels lift away once the renderer's first frame is ready.
 - [src/foam/router/routes.ts](src/foam/router/routes.ts): `routeIndex()` and per-route meta, `inert` and chrome.
 - [src/foam/scene/grid_mesh.ts](src/foam/scene/grid_mesh.ts): the one shared 16x16 grid quad.
 - [src/foam/scene/photos.ts](src/foam/scene/photos.ts): 13 photos packed into one texture array, plus their aspects.

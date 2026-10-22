@@ -6,6 +6,7 @@ import { applyMeta, routeIndex } from './router/routes';
 import { FAN_CARDS, fanCards, fanPhotos } from './scene/fan';
 import { gridMesh } from './scene/grid_mesh';
 import { loadPhotos, PHOTOS } from './scene/photos';
+import { fitTitle } from './text/fit_title';
 import { layoutText, TEXT_STRIDE, warmText } from './text/text_layout';
 import { lookAt, multiply, perspective } from '../math/mat4';
 import { requiredElement } from '../utils/dom';
@@ -39,6 +40,10 @@ const SLIDE_PHOTOS = [2, 6, 9, 11, 0, 4, 7, 12, 1, 3, 5, 8, 10]; // every photo,
 
 async function main(): Promise<void> {
   await Promise.all([initDomCompiler(), document.fonts.ready]);
+  // Size the hero title before anything reads layout; refit before every
+  // resize-driven recompile (resize handlers run before ResizeObserver).
+  fitTitle();
+  addEventListener('resize', fitTitle);
   const { device, context, format } = await initializeWebGPU(canvas);
   context.configure({ device, format, alphaMode: 'opaque' });
 
@@ -144,6 +149,14 @@ async function main(): Promise<void> {
     let photo = 0;
     for (const [scene, { root }] of routes.entries()) {
       if (scene === ABOUT) boxDraws(scene, fan, FAN_CARDS, 1, fanLayers);
+      // Mesh-gradient backgrounds ([data-gl-bg]) go first, under everything else.
+      const bgs = compileRects(root, '[data-gl-bg]', 'background-color');
+      if (bgs.length)
+        addDraw(
+          { pipeline: pipelines.mesh, index: triBuf, n: mesh.tris.length, wire: 0, ring: 0, scene, slot2: noPhotos(bgs.length / STRIDE) },
+          vertexBuffer('backgrounds', bgs),
+          bgs.length / STRIDE,
+        );
       const boxes = compileRects(root, '[data-gl]', 'background-color');
       if (boxes.length) {
         // Leaf panes get the next photo (or their data-photo); containers keep their colour.
@@ -268,8 +281,14 @@ async function main(): Promise<void> {
     if (inList !== undefined) return !list.on;
     return s !== undefined && (list.on || Number(s) !== slide.next);
   };
+  // Text waits for the intro loader to clear, then everything in view plays.
+  let introDone = !document.getElementById('loader');
+  addEventListener('foam:intro-done', () => {
+    introDone = true;
+    for (const el of inView) if (sceneOf(el) === to) play(el);
+  }, { once: true });
   const play = (el: Element) => {
-    if (played.has(el) || isHiddenSlide(el)) return;
+    if (!introDone || played.has(el) || isHiddenSlide(el)) return;
     played.add(el);
     const reveal = reveals[sceneOf(el)];
     const i = reveal?.elements.indexOf(el) ?? -1;
@@ -468,6 +487,7 @@ async function main(): Promise<void> {
   thumbs[0].toggleAttribute('aria-current', true);
   centerThumb(0);
 
+  const workUi = requiredElement<HTMLDivElement>('#work-ui');
   const onRoute = () => {
     const next = routeIndex();
     if (next !== to) {
@@ -491,6 +511,8 @@ async function main(): Promise<void> {
     // Only the current route's text is exposed to assistive tech (inert), and
     // each route gets its own title, description, canonical URL and chrome.
     applyMeta(next);
+    // The work chrome (minimap, Index) waits until the reveal into work has finished.
+    workUi.hidden = !(next === WORK && from === to);
     // Chrome sits on the full-bleed image on work, so it flips to light.
     for (const id of ['#nav', '#view']) requiredElement(id).classList.toggle('on-dark', next === WORK && !list.on);
   };
@@ -498,6 +520,7 @@ async function main(): Promise<void> {
   for (const a of document.querySelectorAll<HTMLAnchorElement>('#nav a'))
     a.onclick = (e) => {
       if (e.metaKey || e.ctrlKey || e.shiftKey || e.button) return; // new tab etc. stays native
+      if (a.origin !== location.origin) return; // mailto: and external links stay native
       e.preventDefault();
       if (a.pathname !== location.pathname) history.pushState(null, '', a.pathname);
       onRoute();
@@ -568,6 +591,7 @@ async function main(): Promise<void> {
       p = Math.min(1, p + dt / REVEAL_SECONDS);
       if (p >= 1) {
         from = to;
+        workUi.hidden = to !== WORK;
         // Work was left from its list view: reset it now that it is off screen.
         if (to !== WORK && list.on) setList(false, true);
         p = 0;
@@ -674,7 +698,7 @@ async function main(): Promise<void> {
         if ((d.wire && mode === 'solid') || (!d.wire && mode === 'wire')) continue;
         const u = new Float32Array(32);
         u.set(viewProj);
-        u.set([w, h, sc, spin.angle, FAN_CARDS, d.wire, d.ring, spin.vel, mouse.x, mouse.y + sc, mouse.hover, d.lift ?? 0, d.list ? list.v : 1], 16);
+        u.set([w, h, sc, spin.angle, FAN_CARDS, d.wire, d.ring, spin.vel, mouse.x, mouse.y + sc, mouse.hover, d.lift ?? 0, d.list ? list.v : 1, now / 1000], 16);
         device.queue.writeBuffer(d.uniform, 0, u);
         pass.setPipeline(d.pipeline);
         pass.setBindGroup(0, d.bindGroup);
@@ -697,11 +721,16 @@ async function main(): Promise<void> {
     pass.end();
     device.queue.submit([encoder.finish()]);
     requestAnimationFrame(frame);
+    // The first rendered frame tells the loader it can finish.
+    if (!readySent) dispatchEvent(new Event('foam:ready'));
+    readySent = true;
   };
+  let readySent = false;
   requestAnimationFrame(frame);
 }
 
 main().catch((error) => {
+  dispatchEvent(new Event('foam:ready')); // never leave the loader up over the error
   console.error(error);
   message.textContent = error instanceof Error ? error.message : String(error);
   message.classList.add('visible');

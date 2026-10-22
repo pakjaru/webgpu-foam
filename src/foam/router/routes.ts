@@ -40,5 +40,16 @@ export const applyMeta = (i: number) => {
   setAttr('link[rel="canonical"]', 'href', url);
   routes.forEach((r, j) => (r.inert = j !== i));
   document.querySelector<HTMLElement>('#work-ui')!.hidden = path !== '/work';
-  for (const a of document.querySelectorAll<HTMLAnchorElement>('#nav a')) a.toggleAttribute('aria-current', a.pathname === path);
+  // Only each page's own link (data-page) is marked; Process, Projects etc. are sub-links.
+  for (const a of document.querySelectorAll<HTMLAnchorElement>('#nav a[data-page]')) a.toggleAttribute('aria-current', a.pathname === path);
+};
+
+/** Keeps the header clock (#nav-clock) on Yogyakarta time (WIB, UTC+7), updated each minute. */
+export const startClock = () => {
+  const el = document.getElementById('nav-clock');
+  if (!el) return;
+  const format = new Intl.DateTimeFormat('en-GB', { hour: '2-digit', minute: '2-digit', timeZone: 'Asia/Jakarta' });
+  const tick = () => (el.textContent = `${format.format(new Date())} WIB`);
+  tick();
+  setInterval(tick, 30_000);
 };

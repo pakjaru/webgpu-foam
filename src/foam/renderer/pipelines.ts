@@ -84,6 +84,9 @@ export function createPipelines(device: GPUDevice, format: GPUTextureFormat) {
     boxSolid: pipeline('triangle-list', 'vs', 'fs_solid', STRIDE, boxLayout),
     boxWire: pipeline('line-list', 'vs', 'fs_wire', STRIDE, boxLayout),
     boxFade: pipeline('triangle-list', 'vs', 'fs_solid', STRIDE, boxLayout, alpha), // work list rows
+    // Home background. Drawn first and opaque, but through the blended path so it
+    // writes no depth and never hides the lines and text laid out on top of it.
+    mesh: pipeline('triangle-list', 'vs', 'fs_mesh', STRIDE, boxLayout, alpha),
     textSolid: pipeline('triangle-list', 'vs_text', 'fs_text', TEXT_STRIDE, textLayout, alpha),
     textWire: pipeline('line-list', 'vs_text', 'fs_wire', TEXT_STRIDE, boxLayout),
   };
